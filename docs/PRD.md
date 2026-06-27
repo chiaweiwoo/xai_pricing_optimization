@@ -4,7 +4,7 @@
 **Date:** 2026-06-28  
 **Primary assumption to validate:** one upcoming pricing cycle, with product-level prices or discounts chosen simultaneously across a retail portfolio.
 
-Implementation note: the repository now includes the v1 data-layer slice for this PRD: verified dunnhumby download, SQLite ingestion, profiling, validation, and deterministic synthetic pricing context generation.
+Implementation note: the repository now includes the v1 data-and-OR slice for this PRD: verified dunnhumby download, SQLite ingestion, profiling, validation, deterministic synthetic pricing scenarios, and a persisted three-phase baseline optimizer.
 
 ## 1. Product thesis
 

@@ -2,13 +2,15 @@
 
 An explainable retail pricing decision system. Given precomputed demand/price-response curves for multiple SKUs, it selects a portfolio price plan that maximizes expected gross profit while satisfying business rules, then makes every recommendation reviewable through solver-grounded explanations and editable what-if scenarios.
 
-The repository now has a working data-layer foundation:
+The repository now has a working pricing-optimization foundation:
 
 - verified public-data download
 - SQLite schema with tracked migrations
 - workbook-to-database ingest
 - persisted data quality checks
-- deterministic synthetic pricing context
+- deterministic synthetic pricing scenarios
+- persisted OR solver runs and phase diagnostics
+- deterministic baseline optimizer with budget, margin, inventory, and competitor logic
 - generated EDA/profile artifacts
 
 See the [PRD](docs/PRD.md), [data layer notes](docs/data_layer.md), and [synthetic methodology](docs/synthetic_methodology.md).
@@ -21,6 +23,8 @@ uv run python download_data.py
 uv run python ingest.py
 uv run python validate_data.py
 uv run python generate_demo_context.py
+uv run python solve_pricing.py balanced_campaign_v1
+uv run python solve_pricing.py inventory_stress_v1
 uv run python profile_data.py
 uv run pytest
 ```
@@ -30,6 +34,12 @@ Outputs:
 - SQLite database: `db/pricing_optimization.db`
 - Raw source files: `data/raw/dunnhumby_breakfast_at_the_frat/`
 - Profiling artifacts: `reports/generated/`
+- Optimizer audit tables: `optimizer_runs`, `optimizer_run_phases`, `optimizer_run_items`
+
+The two built-in synthetic scenarios are:
+
+- `balanced_campaign_v1`: feasible portfolio with mixed 0%, 5%, 10%, 15%, and 20% discounts
+- `inventory_stress_v1`: same product set with tighter inventory, more protected SKUs, and a sharper budget trade-off
 
 ## Core business questions
 
@@ -91,6 +101,6 @@ The current recommendation is **Breakfast at the Frat for the MVP story**, becau
 - [x] Public dataset selected, downloaded, and ingested into SQLite
 - [x] Data profiling, validation checks, and generated EDA artifacts
 - [x] Deterministic synthetic context for pricing optimization inputs
-- [ ] Freeze the solver input/output contracts
-- [ ] Implement a deterministic baseline solver
+- [x] Freeze the baseline solver input/output contracts in SQLite
+- [x] Implement a deterministic baseline solver
 - [ ] Add explanation, rule-authoring, and what-if workflows
