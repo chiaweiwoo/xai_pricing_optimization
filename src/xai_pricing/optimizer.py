@@ -62,8 +62,14 @@ class PricingOptimizer:
     def solve(self, request: SolveRequest) -> SolveResult:
         scenario = self._load_scenario(request.scenario_id)
         run_id = request.run_id or self._default_run_id(request)
-        effective_budget_pct = request.budget_pct or float(scenario["budget_pct"])
-        effective_safety_stock_pct = request.safety_stock_pct or float(scenario["safety_stock_pct"])
+        effective_budget_pct = (
+            float(request.budget_pct) if request.budget_pct is not None else float(scenario["budget_pct"])
+        )
+        effective_safety_stock_pct = (
+            float(request.safety_stock_pct)
+            if request.safety_stock_pct is not None
+            else float(scenario["safety_stock_pct"])
+        )
         input_hash = self._input_hash(request, effective_budget_pct, effective_safety_stock_pct)
 
         candidate_df = self._load_candidate_frame(request.scenario_id)
@@ -121,6 +127,7 @@ class PricingOptimizer:
                 working_df=working_df,
                 effective_budget_pct=effective_budget_pct,
                 phase_values=prior_bounds,
+                exact_discount_locks=request.exact_discount_locks,
             )
             phase_results.append(phase_result)
             self._insert_phase(run_id, phase_result)
@@ -245,6 +252,7 @@ class PricingOptimizer:
         df["margin_valid"] = df["gross_margin_pct"] + 1e-9 >= df["effective_min_margin_pct"]
         df["inventory_valid"] = df["inventory_buffer_units"] + 1e-9 >= 0
         df["discount_valid"] = df["discount_pct"] <= df["max_discount_pct"] + 1e-9
+        df["effective_hard_violation_reason"] = df.apply(self._derive_effective_violation_reason, axis=1)
         df["effective_hard_valid"] = df["margin_valid"] & df["inventory_valid"] & df["discount_valid"]
         df["effective_competitor_gap"] = (
             df["competitor_index"] - (1 + df["effective_competitor_tolerance_pct"])
@@ -268,7 +276,9 @@ class PricingOptimizer:
             "hard_violation_counts": {
                 "margin": int((~df["margin_valid"]).sum()),
                 "inventory": int((~df["inventory_valid"]).sum()),
+                "discount": int((~df["discount_valid"]).sum()),
             },
+            "hard_violation_examples": self._summarize_violation_examples(df),
         }
         if invalid_upcs:
             precheck["status"] = "infeasible"
@@ -291,7 +301,7 @@ class PricingOptimizer:
                             "upc": upc,
                             "reason": "candidate_invalid",
                             "discount_pct": discount_pct,
-                            "hard_violation_reason": locked_row["hard_violation_reason"],
+                            "hard_violation_reason": locked_row["effective_hard_violation_reason"],
                         }
                     )
             if precheck["lock_conflicts"]:
@@ -307,6 +317,7 @@ class PricingOptimizer:
         working_df: pd.DataFrame,
         effective_budget_pct: float,
         phase_values: dict[str, float],
+        exact_discount_locks: dict[str, float],
     ) -> tuple[PhaseResult, pd.DataFrame]:
         eligible_df = working_df[working_df["effective_hard_valid"]].copy()
         model = pulp.LpProblem(
@@ -327,6 +338,18 @@ class PricingOptimizer:
                 pulp.lpSum(variable_map[(upc, candidate_rank)] for candidate_rank in group["candidate_rank"]) == 1,
                 f"select_one_{upc}",
             )
+            if upc in exact_discount_locks:
+                locked_discount_pct = exact_discount_locks[upc]
+                locked_candidates = [
+                    variable_map[(upc, candidate_rank)]
+                    for candidate_rank, discount_pct in zip(
+                        group["candidate_rank"],
+                        group["discount_pct"],
+                        strict=True,
+                    )
+                    if abs(float(discount_pct) - float(locked_discount_pct)) < 1e-9
+                ]
+                model += (pulp.lpSum(locked_candidates) == 1, f"lock_discount_{upc}")
 
         model += (
             pulp.lpSum(
@@ -369,6 +392,7 @@ class PricingOptimizer:
             "variable_count": len(variable_map),
             "constraint_count": len(model.constraints),
             "budget_pct": effective_budget_pct,
+            "lock_count": len(exact_discount_locks),
         }
         phase_result = PhaseResult(
             phase_name=phase_name,
@@ -490,9 +514,15 @@ class PricingOptimizer:
         safety_stock_pct: float,
         diagnostics: dict[str, object],
     ) -> None:
-        self.conn.execute("DELETE FROM optimizer_run_items WHERE run_id = ?", (run_id,))
-        self.conn.execute("DELETE FROM optimizer_run_phases WHERE run_id = ?", (run_id,))
-        self.conn.execute("DELETE FROM optimizer_runs WHERE run_id = ?", (run_id,))
+        existing_run = self.conn.execute(
+            "SELECT run_id, run_kind, status FROM optimizer_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if existing_run is not None:
+            raise RuntimeError(
+                f"Run ID already exists and cannot be overwritten: {run_id} "
+                f"({existing_run['run_kind']}, {existing_run['status']})"
+            )
         self.conn.execute(
             """
             INSERT INTO optimizer_runs (
@@ -593,6 +623,47 @@ class PricingOptimizer:
 
     def _default_run_id(self, request: SolveRequest) -> str:
         return f"{request.scenario_id}_{request.run_kind}_{uuid.uuid4().hex[:8]}"
+
+    def _derive_effective_violation_reason(self, row: pd.Series) -> str | None:
+        reasons: list[str] = []
+        if not bool(row["margin_valid"]):
+            reasons.append("margin")
+        if not bool(row["inventory_valid"]):
+            reasons.append("inventory")
+        if not bool(row["discount_valid"]):
+            reasons.append("discount_limit")
+        return ",".join(reasons) if reasons else None
+
+    def _summarize_violation_examples(self, df: pd.DataFrame) -> list[dict[str, object]]:
+        invalid_df = df[~df["effective_hard_valid"]].copy()
+        if invalid_df.empty:
+            return []
+        columns = [
+            "upc",
+            "discount_pct",
+            "effective_hard_violation_reason",
+            "gross_margin_pct",
+            "effective_min_margin_pct",
+            "ending_inventory_units",
+            "effective_safety_stock_units",
+            "max_discount_pct",
+        ]
+        samples = invalid_df.sort_values(["upc", "discount_pct"], ascending=[True, False])[columns].head(8)
+        records: list[dict[str, object]] = []
+        for row in samples.itertuples(index=False):
+            records.append(
+                {
+                    "upc": row.upc,
+                    "discount_pct": round(float(row.discount_pct), 4),
+                    "reason": row.effective_hard_violation_reason,
+                    "gross_margin_pct": round(float(row.gross_margin_pct), 4),
+                    "min_margin_pct": round(float(row.effective_min_margin_pct), 4),
+                    "ending_inventory_units": round(float(row.ending_inventory_units), 4),
+                    "safety_stock_units": round(float(row.effective_safety_stock_units), 4),
+                    "max_discount_pct": round(float(row.max_discount_pct), 4),
+                }
+            )
+        return records
 
     def _input_hash(
         self,
