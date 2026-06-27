@@ -10,7 +10,11 @@ The repository now has a working pricing-optimization foundation:
 - persisted data quality checks
 - deterministic synthetic pricing scenarios
 - persisted OR solver runs and phase diagnostics
-- deterministic baseline optimizer with budget, margin, inventory, and competitor logic
+- deterministic optimizer with budget, margin, inventory, and competitor logic
+- benchmark plan bundle: official, profit-first feasible, current-price baseline, theoretical ceiling
+- immutable what-if child runs and per-SKU evidence dossiers
+- bounded DeepSeek-assisted conversation layer for explanations and counterfactuals
+- Streamlit decision workbench
 - generated EDA/profile artifacts
 
 See the [PRD](docs/PRD.md), [data layer notes](docs/data_layer.md), and [synthetic methodology](docs/synthetic_methodology.md).
@@ -27,6 +31,7 @@ uv run python solve_pricing.py balanced_campaign_v1
 uv run python solve_pricing.py inventory_stress_v1
 uv run python profile_data.py
 uv run pytest
+uv run python -m streamlit run streamlit_app.py
 ```
 
 Outputs:
@@ -40,6 +45,16 @@ The two built-in synthetic scenarios are:
 
 - `balanced_campaign_v1`: feasible portfolio with mixed 0%, 5%, 10%, 15%, and 20% discounts
 - `inventory_stress_v1`: same product set with tighter inventory, more protected SKUs, and a sharper budget trade-off
+
+## What the app now shows
+
+- `Official proposal`: competitor-first, then gross profit, then shallower discount depth
+- `Profit-first feasible`: respects the same hard rules and 10% markdown budget, but maximizes gross profit first
+- `Current-price baseline`: what happens if we keep the current price points
+- `Theoretical profit ceiling`: per-SKU best feasible profit point, ignoring portfolio budget and competitor priority
+- `What-if simulation`: a separate child run that never mutates the official proposal
+
+In the current `balanced_campaign_v1` demo, the official proposal trades away some gross profit to protect competitor position. On the seeded scenario today, the official run lands at `52,998.21` gross profit with weighted competitor gap `0.6092`, while the profit-first feasible benchmark reaches `57,955.53` gross profit but accepts a much larger weighted competitor gap of `8.8058`.
 
 ## Core business questions
 
@@ -70,6 +85,16 @@ product + price-response inputs + competitor/inventory context
 ```
 
 The solver, not the LLM, owns calculations and feasibility. The LLM may translate a planner's request into a typed rule proposal and narrate structured solver evidence; it may not invent constraints, numbers, or causal claims.
+
+The current assistant is intentionally narrow. It supports only:
+
+- plan summary
+- why a SKU got its selected discount
+- why not another discrete discount for a SKU
+- what-if force a discrete SKU discount
+- what-if change `budget_pct`, `safety_stock_pct`, `min_margin_pct` for one SKU, or `competitor_tolerance_pct` for one SKU
+
+Every supported what-if runs on a separate child solve keyed off the official run ID.
 
 ## Initial data direction
 
@@ -103,4 +128,6 @@ The current recommendation is **Breakfast at the Frat for the MVP story**, becau
 - [x] Deterministic synthetic context for pricing optimization inputs
 - [x] Freeze the baseline solver input/output contracts in SQLite
 - [x] Implement a deterministic baseline solver
-- [ ] Add explanation, rule-authoring, and what-if workflows
+- [x] Add benchmark plans and immutable what-if workflows
+- [x] Add bounded explanation and counterfactual conversation support
+- [x] Build the Streamlit decision workbench
