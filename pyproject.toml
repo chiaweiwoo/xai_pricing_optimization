@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Explainable pricing optimization demo built on dunnhumby's Breakfast at the Frat dataset."
 requires-python = ">=3.14"
 dependencies = [
+    "highspy>=1.14",
     "matplotlib>=3.10",
     "openpyxl>=3.1",
     "pandas>=2.3",
+    "pulp>=3.3",
 ]
 
 [build-system]
