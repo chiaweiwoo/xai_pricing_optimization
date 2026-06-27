@@ -17,6 +17,6 @@ SOURCE_ARCHIVE_SHA256 = "74CB41CB8B19DC61BB8A5731C3774B802E9A8DA3B64CDD187264089
 SOURCE_WORKBOOK_NAME = "dunnhumby - Breakfast at the Frat.xlsx"
 SOURCE_GUIDE_NAME = "dunnhumby - Breakfast at the Frat User Guide.pdf"
 
-DEFAULT_SCENARIO_ID = "demo_pricing_v1"
-DEFAULT_SCENARIO_NAME = "Pricing Optimization Demo v1"
+DEFAULT_SCENARIO_ID = "balanced_campaign_v1"
+DEFAULT_SCENARIO_NAME = "Balanced Promotion Campaign v1"
 DEFAULT_SYNTHETIC_SEED = 20260628
