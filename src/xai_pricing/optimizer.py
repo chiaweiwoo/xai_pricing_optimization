@@ -14,11 +14,18 @@ import pulp
 from .db import json_dumps, utc_now
 
 
-PHASE_SEQUENCE = (
-    ("phase_1_competitor_gap", "min"),
-    ("phase_2_gross_profit", "max"),
-    ("phase_3_discount_depth", "min"),
-)
+OBJECTIVE_MODES: dict[str, tuple[tuple[str, str], ...]] = {
+    "official": (
+        ("competitor_gap", "min"),
+        ("gross_profit", "max"),
+        ("discount_depth", "min"),
+    ),
+    "profit_first": (
+        ("gross_profit", "max"),
+        ("competitor_gap", "min"),
+        ("discount_depth", "min"),
+    ),
+}
 SOLVER_NAME = "pulp_highs"
 
 
@@ -28,6 +35,7 @@ class SolveRequest:
     run_id: str | None = None
     run_kind: str = "official"
     source_run_id: str | None = None
+    objective_mode: str = "official"
     budget_pct: float | None = None
     safety_stock_pct: float | None = None
     min_margin_overrides: dict[str, float] = field(default_factory=dict)
@@ -62,6 +70,9 @@ class PricingOptimizer:
     def solve(self, request: SolveRequest) -> SolveResult:
         scenario = self._load_scenario(request.scenario_id)
         run_id = request.run_id or self._default_run_id(request)
+        phase_sequence = OBJECTIVE_MODES.get(request.objective_mode)
+        if phase_sequence is None:
+            raise RuntimeError(f"Unsupported objective_mode: {request.objective_mode}")
         effective_budget_pct = (
             float(request.budget_pct) if request.budget_pct is not None else float(scenario["budget_pct"])
         )
@@ -87,6 +98,12 @@ class PricingOptimizer:
             "profile_id": scenario["profile_id"],
             "effective_budget_pct": effective_budget_pct,
             "effective_safety_stock_pct": effective_safety_stock_pct,
+            "objective_mode": request.objective_mode,
+            "rule_inputs": {
+                "min_margin_overrides": request.min_margin_overrides,
+                "competitor_tolerance_overrides": request.competitor_tolerance_overrides,
+                "exact_discount_locks": request.exact_discount_locks,
+            },
             "precheck": precheck,
         }
         self._insert_run(
@@ -119,10 +136,12 @@ class PricingOptimizer:
         selected_df: pd.DataFrame | None = None
         status = "optimal"
 
-        for phase_name, sense in PHASE_SEQUENCE:
+        for phase_idx, (objective_key, sense) in enumerate(phase_sequence, start=1):
+            phase_name = f"phase_{phase_idx}_{objective_key}"
             prior_bounds = phase_values.copy()
             phase_result, candidate_selection = self._solve_phase(
                 phase_name=phase_name,
+                objective_key=objective_key,
                 sense=sense,
                 working_df=working_df,
                 effective_budget_pct=effective_budget_pct,
@@ -136,7 +155,7 @@ class PricingOptimizer:
                 diagnostics["failed_phase"] = phase_name
                 diagnostics["failed_status"] = phase_result.status
                 break
-            phase_values[phase_name] = float(phase_result.objective_value or 0.0)
+            phase_values[objective_key] = float(phase_result.objective_value or 0.0)
             selected_df = candidate_selection
 
         selections: list[dict[str, object]] = []
@@ -197,6 +216,8 @@ class PricingOptimizer:
                 c.competitor_index,
                 c.inventory_cap_units,
                 c.expected_units_capped,
+                c.is_current_price,
+                c.is_reference_price,
                 c.list_price,
                 c.markdown_investment,
                 c.ending_inventory_units,
@@ -313,6 +334,7 @@ class PricingOptimizer:
         self,
         *,
         phase_name: str,
+        objective_key: str,
         sense: str,
         working_df: pd.DataFrame,
         effective_budget_pct: float,
@@ -361,7 +383,7 @@ class PricingOptimizer:
         )
 
         for phase_key, value in phase_values.items():
-            if phase_key == "phase_1_competitor_gap":
+            if phase_key == "competitor_gap":
                 coeffs = [
                     float(row.effective_competitor_gap) * int(row.competitor_weight)
                     for row in eligible_df.itertuples(index=False)
@@ -370,16 +392,16 @@ class PricingOptimizer:
                     coeff * variable_map[(row.upc, row.candidate_rank)]
                     for coeff, row in zip(coeffs, eligible_df.itertuples(index=False), strict=True)
                 )
-                model += (lhs <= value + 1e-6, "lock_phase_1")
-            elif phase_key == "phase_2_gross_profit":
+                model += (lhs <= value + 1e-6, "lock_competitor_gap")
+            elif phase_key == "gross_profit":
                 coeffs = [float(row.gross_profit) for row in eligible_df.itertuples(index=False)]
                 lhs = pulp.lpSum(
                     coeff * variable_map[(row.upc, row.candidate_rank)]
                     for coeff, row in zip(coeffs, eligible_df.itertuples(index=False), strict=True)
                 )
-                model += (lhs >= value - 1e-6, "lock_phase_2")
+                model += (lhs >= value - 1e-6, "lock_gross_profit")
 
-        objective = self._build_objective(phase_name, eligible_df, variable_map)
+        objective = self._build_objective(objective_key, eligible_df, variable_map)
         model += objective
 
         solver = pulp.HiGHS(msg=False)
@@ -410,16 +432,16 @@ class PricingOptimizer:
 
     def _build_objective(
         self,
-        phase_name: str,
+        objective_key: str,
         eligible_df: pd.DataFrame,
         variable_map: dict[tuple[str, int], pulp.LpVariable],
     ) -> pulp.LpAffineExpression:
         terms = []
         for row in eligible_df.itertuples(index=False):
             variable = variable_map[(row.upc, row.candidate_rank)]
-            if phase_name == "phase_1_competitor_gap":
+            if objective_key == "competitor_gap":
                 coeff = float(row.effective_competitor_gap) * int(row.competitor_weight)
-            elif phase_name == "phase_2_gross_profit":
+            elif objective_key == "gross_profit":
                 coeff = float(row.gross_profit)
             else:
                 coeff = float(row.discount_pct)
@@ -539,7 +561,7 @@ class PricingOptimizer:
                 request.run_kind,
                 "running",
                 SOLVER_NAME,
-                "lexicographic_competitor_then_profit_then_shallower_discount",
+                request.objective_mode,
                 input_hash,
                 budget_pct,
                 safety_stock_pct,
@@ -622,7 +644,7 @@ class PricingOptimizer:
         self.conn.commit()
 
     def _default_run_id(self, request: SolveRequest) -> str:
-        return f"{request.scenario_id}_{request.run_kind}_{uuid.uuid4().hex[:8]}"
+        return f"{request.scenario_id}_{request.run_kind}_{request.objective_mode}_{uuid.uuid4().hex[:8]}"
 
     def _derive_effective_violation_reason(self, row: pd.Series) -> str | None:
         reasons: list[str] = []
