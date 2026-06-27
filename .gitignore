@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Generated and downloaded artifacts
+data/raw/
+data/processed/
+db/
+artifacts/
+reports/generated/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
