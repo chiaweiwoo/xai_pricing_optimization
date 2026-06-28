@@ -101,17 +101,7 @@ class PricingDecisionService:
             ).fetchall()
         ]
         selections = [
-            {
-                "upc": row["upc"],
-                "candidate_rank": int(row["candidate_rank"]),
-                "candidate_price": round(float(row["candidate_price"]), 2),
-                "discount_pct": round(float(row["discount_pct"]), 4),
-                "gross_profit": round(float(row["gross_profit"]), 4),
-                "expected_units": round(float(row["expected_units"]), 4),
-                "ending_inventory_units": round(float(row["ending_inventory_units"]), 4),
-                "competitor_gap": round(float(row["competitor_gap"]), 4),
-                **json.loads(row["evidence_json"]),
-            }
+            self._deserialize_selection_row(row)
             for row in self.conn.execute(
                 """
                 SELECT
@@ -481,4 +471,20 @@ class PricingDecisionService:
             "lock_conflicts": precheck.get("lock_conflicts", []),
             "hard_violation_counts": precheck.get("hard_violation_counts", {}),
             "hard_violation_examples": precheck.get("hard_violation_examples", []),
+        }
+
+    def _deserialize_selection_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        evidence = json.loads(row["evidence_json"])
+        return {
+            "upc": row["upc"],
+            "candidate_rank": int(row["candidate_rank"]),
+            "candidate_price": round(float(row["candidate_price"]), 2),
+            "discount_pct": round(float(row["discount_pct"]), 4),
+            "gross_profit": round(float(row["gross_profit"]), 4),
+            "expected_units": round(float(row["expected_units"]), 4),
+            "ending_inventory_units": round(float(row["ending_inventory_units"]), 4),
+            "competitor_gap": round(float(row["competitor_gap"]), 4),
+            "archetype": evidence.get("archetype"),
+            "role": evidence.get("strategic_role"),
+            **evidence,
         }

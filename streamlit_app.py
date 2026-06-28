@@ -178,6 +178,10 @@ def _recommendation_table(run) -> pd.DataFrame:
     frame = pd.DataFrame(run.selections)
     if frame.empty:
         return frame
+    if "role" not in frame.columns:
+        frame["role"] = "unknown"
+    if "archetype" not in frame.columns:
+        frame["archetype"] = "unknown"
     frame = frame.rename(
         columns={
             "candidate_price": "price",

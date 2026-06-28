@@ -25,6 +25,8 @@ def test_plan_bundle_provides_benchmarks(seeded_conn) -> None:
         bundle.theoretical_ceiling.summary["total_gross_profit"]
         >= bundle.official.summary["total_gross_profit"]
     )
+    assert "role" in bundle.official.selections[0]
+    assert "archetype" in bundle.official.selections[0]
 
 
 def test_counterfactual_runs_are_cached_and_immutable(seeded_conn) -> None:
