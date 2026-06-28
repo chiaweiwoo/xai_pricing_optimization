@@ -48,30 +48,33 @@ The two built-in synthetic scenarios are:
 
 ## What the app now shows
 
-The Streamlit app is now organized as a guided journey for a category manager who is new to this specific project:
+The Streamlit app now reads as a single-page pricing briefing for an audience that is new to this project:
 
-- `Decision Brief`: what decision is being made, why the official proposal exists, and the main trade-off to review first
-- `Product Decisions`: which products were promoted or protected, plus one-product inspection with competitor and inventory context
-- `Ask & Simulate`: a bounded conversation layer that explains the fixed proposal or runs a separate what-if solve
-- `Method & Audit`: solver phases, provenance, glossary, and the latest assistant evidence payload
+- hero verdict: should this recommended campaign be approved?
+- three headline metrics: promoted products, competitor mismatch improvement, and gross-profit trade-off
+- discount-mix overview: how the campaign uses the discrete discount ladder
+- three review products: one competitor-driven case, one inventory-protected case, and one large profit trade-off
+- one-product spotlight: current point, recommended point, local best profit point, and the full discount ladder on demand
+- small chat section: explain the recommendation or run one bounded what-if without changing it
+- technical evidence: benchmarks, solver phases, full recommendation table, glossary, provenance, and latest assistant evidence
 
-The current official recommendation should be read as a `price-position strategy`, not a pure profit-maximizing plan. In the inventory stress scenario, the official plan:
+The current recommended campaign should be read as a `price-position strategy`, not a pure profit-maximizing plan. In the inventory stress scenario, the recommended campaign:
 
 - promotes 36 of 55 products
 - uses the full 10% markdown budget
-- improves weighted competitor gap from `8.7564` to `0.6653`
+- improves competitor mismatch score from `8.7564` to `0.6653`
 - increases revenue by about `$16,466`
 - sacrifices about `$4,742` gross profit versus keeping current prices
 
 The app keeps five core reference concepts visible:
 
-- `Official proposal`: competitor-first, then gross profit, then shallower discount depth
+- `Recommended campaign`: competitor-first, then gross profit, then shallower discount depth
 - `Profit-first feasible`: respects the same hard rules and 10% markdown budget, but maximizes gross profit first
 - `Current-price baseline`: what happens if we keep the current price points
 - `Theoretical profit ceiling`: per-SKU best feasible profit point, ignoring portfolio budget and competitor priority
-- `What-if simulation`: a separate child run that never mutates the official proposal
+- `What-if simulation`: a separate child run that never mutates the recommended campaign
 
-In the current `balanced_campaign_v1` demo, the official proposal trades away some gross profit to protect competitor position. On the seeded scenario today, the official run lands at `52,998.21` gross profit with weighted competitor gap `0.6092`, while the profit-first feasible benchmark reaches `57,955.53` gross profit but accepts a much larger weighted competitor gap of `8.8058`.
+In the current `balanced_campaign_v1` demo, the recommended campaign trades away some gross profit to protect competitor position. On the seeded scenario today, the recommended run lands at `52,998.21` gross profit with competitor mismatch score `0.6092`, while the profit-first feasible benchmark reaches `57,955.53` gross profit but accepts a much larger competitor mismatch score of `8.8058`.
 
 ## Core business questions
 
@@ -111,7 +114,7 @@ The current assistant is intentionally narrow. It supports only:
 - what-if force a discrete SKU discount
 - what-if change `budget_pct`, `safety_stock_pct`, `min_margin_pct` for one SKU, or `competitor_tolerance_pct` for one SKU
 
-Every supported what-if runs on a separate child solve keyed off the official run ID.
+Every supported what-if runs on a separate child solve keyed off the recommended run ID.
 
 ## Initial data direction
 

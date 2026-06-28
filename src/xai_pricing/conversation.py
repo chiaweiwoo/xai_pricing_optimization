@@ -600,18 +600,18 @@ Rules:
             brief = evidence["plan_brief"]
             official = evidence["official"]
             return {
-                "headline": "Official proposal summary",
+                "headline": "Recommended campaign summary",
                 "summary": (
                     f"{brief['headline']} The plan promotes {self._format_count(official['promoted_products'])} of "
                     f"{self._format_count(official['selected_products'])} products, uses {self._format_pct(official['budget_utilization_pct'])} "
-                    f"of the markdown budget, and lands at weighted competitor gap {self._format_gap(official['weighted_competitor_gap'])}."
+                    f"of the markdown budget, and lands at competitor mismatch score {self._format_gap(official['weighted_competitor_gap'])}."
                 ),
                 "key_points": [
                     f"Gross profit is {self._format_currency(official['total_gross_profit'])}, which is {self._format_currency(brief['profit_vs_current'])} versus current prices.",
                     f"Revenue changes by {self._format_currency(brief['revenue_vs_current'])} versus current prices.",
                     f"The profit-first benchmark earns {self._format_currency(abs(brief['profit_vs_profit_first']))} more gross profit but accepts a worse competitor-position score.",
                 ],
-                "caveat": "This official plan is a competitor-first campaign, not the pure profit-maximizing feasible plan.",
+                "caveat": "This recommended campaign is a competitor-first plan, not the pure profit-maximizing feasible plan.",
                 "suggested_questions": self._starter_questions(plan)[:3],
             }
         if name == "WHY_SELECTED":
@@ -630,16 +630,16 @@ Rules:
                 )
             elif local_best_cf and local_best_cf["comparison"]["comparable"]:
                 key_points.append(
-                    f"The product-local profit winner is feasible by itself, but a portfolio re-solve changes total weighted competitor gap by {self._format_gap(local_best_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
+                    f"The product-local profit winner is feasible by itself, but a portfolio re-solve changes total competitor mismatch score by {self._format_gap(local_best_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
                 )
             return {
                 "headline": f"Why this discount for {dossier['product']['product_label']}",
                 "summary": (
-                    "The official plan kept this product at the selected discount because the portfolio optimizes competitor position before gross profit. "
+                    "The recommended campaign kept this product at the selected discount because the portfolio optimizes competitor position before gross profit. "
                     "That means a product-level profit maximum can still lose once the full portfolio trade-off is considered."
                 ),
                 "key_points": key_points,
-                "caveat": "This explains the fixed official proposal; it does not mean another discount is impossible.",
+                "caveat": "This explains the fixed recommendation; it does not mean another discount is impossible.",
                 "suggested_questions": [
                     f"Why not 0% for {dossier['product']['product_label']}?",
                     f"What if we force 0% for {dossier['product']['product_label']}?",
@@ -680,7 +680,7 @@ Rules:
             ]
             if alt_cf and alt_cf["comparison"]["comparable"]:
                 key_points.append(
-                    f"If we force {self._format_pct(target['discount_pct'])} and re-solve the portfolio, total gross profit changes by {self._format_currency(alt_cf['comparison']['summary_delta']['total_gross_profit'])} and weighted competitor gap changes by {self._format_gap(alt_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
+                    f"If we force {self._format_pct(target['discount_pct'])} and re-solve the portfolio, total gross profit changes by {self._format_currency(alt_cf['comparison']['summary_delta']['total_gross_profit'])} and competitor mismatch score changes by {self._format_gap(alt_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
                 )
             return {
                 "headline": f"Why not {self._format_pct(target['discount_pct'])} for {dossier['product']['product_label']}",
@@ -713,7 +713,7 @@ Rules:
                 "summary": "Official proposal unchanged. This answer comes from a separate child solve used only for comparison.",
                 "key_points": [
                     f"Gross profit changes by {self._format_currency(delta['total_gross_profit'])} and revenue changes by {self._format_currency(delta['total_revenue'])}.",
-                    f"Weighted competitor gap changes by {self._format_gap(delta['weighted_competitor_gap'])}.",
+                    f"Competitor mismatch score changes by {self._format_gap(delta['weighted_competitor_gap'])}.",
                     f"{self._format_count(comparison['changed_sku_count'])} products change versus the official plan.",
                 ],
                 "caveat": "Counterfactual results help review the proposal, but they never overwrite the official recommendation.",

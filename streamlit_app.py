@@ -14,6 +14,7 @@ from xai_pricing.config import DB_PATH
 from xai_pricing.conversation import PricingConversationService
 from xai_pricing.db import get_conn
 from xai_pricing.planner import PlanBundle, PricingDecisionService
+from xai_pricing.ui_support import build_selection_snapshot, select_review_cases
 
 
 SCENARIO_GUIDE = {
@@ -54,11 +55,11 @@ DATA_PROVENANCE_ROWS = [
 ]
 
 GLOSSARY_ROWS = [
-    {"Term": "Official proposal", "Meaning": "The fixed reference recommendation used for explanation and comparison."},
+    {"Term": "Recommended campaign", "Meaning": "The fixed reference recommendation used for explanation and comparison."},
     {"Term": "Profit-first feasible", "Meaning": "A comparison plan that respects the same hard rules but maximizes gross profit first."},
     {"Term": "Current-price baseline", "Meaning": "The outcome if every product keeps its current price point."},
     {"Term": "Theoretical ceiling", "Meaning": "The best product-level gross-profit point without the full portfolio trade-offs."},
-    {"Term": "Weighted competitor gap", "Meaning": "A penalty score for pricing above tolerated competitor position on important products. Lower is better."},
+    {"Term": "Competitor mismatch score", "Meaning": "A penalty score for pricing above tolerated competitor position on important products. Lower is better."},
     {"Term": "Safety stock", "Meaning": "Inventory buffer the solver tries to protect so a promotion does not create stockout risk."},
 ]
 
@@ -72,7 +73,7 @@ PHASE_GUIDE = {
 st.set_page_config(
     page_title="XAI Pricing Optimization",
     page_icon=":material/local_offer:",
-    layout="wide",
+    layout="centered",
 )
 
 st.markdown(
@@ -111,9 +112,10 @@ st.markdown(
     .block-container {
         padding-top: 1.8rem;
         padding-bottom: 2rem;
+        max-width: 980px;
     }
 
-    .hero-card, .note-card, .journey-card, .assistant-card {
+    .hero-card, .note-card, .journey-card, .assistant-card, .case-card {
         background: linear-gradient(135deg, rgba(255,255,255,0.94), rgba(255,244,232,0.88));
         border: 1px solid var(--border);
         border-radius: 24px;
@@ -125,7 +127,7 @@ st.markdown(
         margin-bottom: 1rem;
     }
 
-    .note-card, .journey-card, .assistant-card {
+    .note-card, .journey-card, .assistant-card, .case-card {
         padding: 1rem 1.1rem;
         margin-bottom: 0.8rem;
     }
@@ -147,6 +149,12 @@ st.markdown(
     .hero-copy, .note-copy {
         color: var(--muted);
         margin: 0;
+    }
+
+    .section-copy {
+        color: var(--muted);
+        margin-top: -0.35rem;
+        margin-bottom: 0.75rem;
     }
 
     .status-row {
@@ -226,6 +234,19 @@ st.markdown(
 
     .assistant-answer h4 {
         margin-bottom: 0.25rem;
+    }
+
+    .case-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin: 0.2rem 0 0.2rem 0;
+    }
+
+    .case-metric {
+        font-size: 1.35rem;
+        font-weight: 700;
+        line-height: 1.1;
+        margin: 0.35rem 0 0.15rem 0;
     }
     </style>
     """,
@@ -377,12 +398,12 @@ def _phase_table(run) -> pd.DataFrame:
 def _benchmark_table(plan: PlanBundle) -> pd.DataFrame:
     rows = [
         {
-            "Plan": "Official proposal",
+            "Plan": "Recommended campaign",
             "Status": plan.official.status,
             "Gross Profit": plan.official.summary["total_gross_profit"],
             "Revenue": plan.official.summary["total_revenue"],
             "Budget Used": plan.official.summary["budget_utilization_pct"],
-            "Weighted Competitor Gap": plan.official.summary["weighted_competitor_gap"],
+            "Competitor Mismatch Score": plan.official.summary["weighted_competitor_gap"],
         },
         {
             "Plan": "Profit-first feasible",
@@ -390,7 +411,7 @@ def _benchmark_table(plan: PlanBundle) -> pd.DataFrame:
             "Gross Profit": plan.profit_first.summary["total_gross_profit"],
             "Revenue": plan.profit_first.summary["total_revenue"],
             "Budget Used": plan.profit_first.summary["budget_utilization_pct"],
-            "Weighted Competitor Gap": plan.profit_first.summary["weighted_competitor_gap"],
+            "Competitor Mismatch Score": plan.profit_first.summary["weighted_competitor_gap"],
         },
         {
             "Plan": "Current-price baseline",
@@ -398,7 +419,7 @@ def _benchmark_table(plan: PlanBundle) -> pd.DataFrame:
             "Gross Profit": plan.current_price.summary["total_gross_profit"],
             "Revenue": plan.current_price.summary["total_revenue"],
             "Budget Used": plan.current_price.summary["budget_utilization_pct"],
-            "Weighted Competitor Gap": plan.current_price.summary["weighted_competitor_gap"],
+            "Competitor Mismatch Score": plan.current_price.summary["weighted_competitor_gap"],
         },
         {
             "Plan": "Theoretical ceiling",
@@ -406,14 +427,14 @@ def _benchmark_table(plan: PlanBundle) -> pd.DataFrame:
             "Gross Profit": plan.theoretical_ceiling.summary["total_gross_profit"],
             "Revenue": plan.theoretical_ceiling.summary["total_revenue"],
             "Budget Used": plan.theoretical_ceiling.summary["budget_utilization_pct"],
-            "Weighted Competitor Gap": plan.theoretical_ceiling.summary["weighted_competitor_gap"],
+            "Competitor Mismatch Score": plan.theoretical_ceiling.summary["weighted_competitor_gap"],
         },
     ]
     return _apply_formats(
         pd.DataFrame(rows),
         currency_cols=["Gross Profit", "Revenue"],
         pct_cols=["Budget Used"],
-        decimal_cols=["Weighted Competitor Gap"],
+        decimal_cols=["Competitor Mismatch Score"],
     )
 
 
@@ -437,7 +458,7 @@ def _recommendation_table(plan: PlanBundle) -> pd.DataFrame:
             "gross_profit": "Expected Gross Profit",
             "expected_units": "Expected Units",
             "ending_inventory_units": "Ending Inventory",
-            "competitor_gap": "Weighted Competitor Gap",
+            "competitor_gap": "Competitor Mismatch Score",
         }
     )
     frame = frame[
@@ -453,14 +474,14 @@ def _recommendation_table(plan: PlanBundle) -> pd.DataFrame:
             "Expected Gross Profit",
             "Expected Units",
             "Ending Inventory",
-            "Weighted Competitor Gap",
+            "Competitor Mismatch Score",
         ]
     ].sort_values(["Category", "Role", "Discount", "Expected Gross Profit"], ascending=[True, True, False, False])
     return _apply_formats(
         frame,
         currency_cols=["Recommended Price", "Expected Gross Profit"],
         pct_cols=["Discount"],
-        decimal_cols=["Weighted Competitor Gap"],
+        decimal_cols=["Competitor Mismatch Score"],
         quantity_cols=["Expected Units", "Ending Inventory"],
     )
 
@@ -476,7 +497,7 @@ def _alternate_candidates_table(alternatives: pd.DataFrame) -> pd.DataFrame:
             "ending_inventory_units": "Ending Inventory",
             "gross_margin_pct": "Gross Margin",
             "competitor_index": "Competitor Index",
-            "competitor_gap": "Weighted Competitor Gap",
+            "competitor_gap": "Competitor Mismatch Score",
             "effective_hard_valid": "Hard-Rule Valid",
             "reason": "Invalid Reason",
             "is_selected": "Selected",
@@ -487,7 +508,7 @@ def _alternate_candidates_table(alternatives: pd.DataFrame) -> pd.DataFrame:
         frame,
         currency_cols=["Candidate Price", "Expected Gross Profit", "Revenue"],
         pct_cols=["Discount", "Gross Margin"],
-        decimal_cols=["Competitor Index", "Weighted Competitor Gap"],
+        decimal_cols=["Competitor Index", "Competitor Mismatch Score"],
         quantity_cols=["Expected Units", "Ending Inventory"],
     )
 
@@ -501,7 +522,7 @@ def _format_delta_table(summary_delta: dict[str, float]) -> pd.DataFrame:
         "total_gross_profit": "Gross Profit",
         "total_markdown_investment": "Markdown Spend",
         "budget_utilization_pct": "Budget Used",
-        "weighted_competitor_gap": "Weighted Competitor Gap",
+        "weighted_competitor_gap": "Competitor Mismatch Score",
         "inventory_tight_products": "Inventory-tight products",
     }
     rows = []
@@ -530,14 +551,14 @@ def _format_changed_skus(changed: pd.DataFrame) -> pd.DataFrame:
             "discount_pct_candidate": "What-If Discount",
             "gross_profit_delta": "Gross Profit Delta",
             "expected_units_delta": "Expected Units Delta",
-            "competitor_gap_delta": "Weighted Competitor Gap Delta",
+            "competitor_gap_delta": "Competitor Mismatch Score Delta",
         }
     )
     return _apply_formats(
         frame,
         pct_cols=["Official Discount", "What-If Discount"],
         currency_cols=["Gross Profit Delta"],
-        decimal_cols=["Weighted Competitor Gap Delta"],
+        decimal_cols=["Competitor Mismatch Score Delta"],
         quantity_cols=["Expected Units Delta"],
     )
 
@@ -576,6 +597,73 @@ def _starter_questions(plan: PlanBundle) -> list[str]:
     ]
 
 
+def _selection_snapshot(plan: PlanBundle, planner: PricingDecisionService) -> list[dict[str, object]]:
+    current_rows: list[dict[str, object]] = []
+    for row in plan.official.selections:
+        dossier = planner.get_sku_dossier(plan.official.run_id, row["upc"])
+        current_rows.append(
+            {
+                "upc": row["upc"],
+                "product_label": row["product_label"],
+                "role": row["role"],
+                "archetype": row["archetype"],
+                "discount_pct": dossier["current"]["discount_pct"],
+                "gross_profit": dossier["current"]["gross_profit"],
+                "competitor_gap": dossier["current"]["competitor_gap"],
+                "ending_inventory_units": dossier["current"]["ending_inventory_units"],
+            }
+        )
+    return build_selection_snapshot(
+        plan.official.selections,
+        current_rows,
+        plan.catalog,
+    )
+
+
+def _review_cases(plan: PlanBundle, planner: PricingDecisionService) -> list[dict[str, object]]:
+    return select_review_cases(_selection_snapshot(plan, planner))
+
+
+def _supported_question_examples(plan: PlanBundle) -> list[str]:
+    sample = _starter_questions(plan)
+    return sample[:3]
+
+
+def _discount_distribution(plan: PlanBundle) -> pd.DataFrame:
+    frame = pd.DataFrame(plan.official.selections)
+    if frame.empty:
+        return pd.DataFrame(columns=["Discount", "Products"])
+    distribution = (
+        frame.assign(
+            Discount=frame["discount_pct"].map(lambda value: f"{int(round(float(value) * 100))}%")
+        )
+        .groupby("Discount", as_index=False)
+        .size()
+        .rename(columns={"size": "Products"})
+    )
+    order = {"0%": 0, "5%": 1, "10%": 2, "15%": 3, "20%": 4, "25%": 5}
+    distribution["sort_key"] = distribution["Discount"].map(lambda value: order.get(value, 99))
+    return distribution.sort_values("sort_key")[["Discount", "Products"]]
+
+
+def _case_metric_label(case: dict[str, object]) -> tuple[str, str]:
+    case_id = str(case["case_id"])
+    if case_id == "competitor_response":
+        return (
+            _format_decimal(float(case["competitor_gap_improvement"])),
+            "mismatch-score improvement vs current",
+        )
+    if case_id == "inventory_protection":
+        return (
+            _format_quantity(float(case["inventory_buffer_units"])),
+            "units above safety stock at campaign end",
+        )
+    return (
+        _format_currency(float(case["gross_profit_tradeoff"])),
+        "gross-profit change vs current for this SKU",
+    )
+
+
 def _render_hero(plan: PlanBundle) -> None:
     brief = plan.brief
     status_kind = "warning" if brief["status"] == "review_required" else "good"
@@ -588,16 +676,314 @@ def _render_hero(plan: PlanBundle) -> None:
                 {_status_badge('Profit trade-off requires review' if brief['status'] == 'review_required' else 'Commercially on track', status_kind)}
                 {_status_badge(f"Scenario: {plan.scenario['scenario_name']}", 'good')}
             </div>
-            <div class="eyebrow">Guided Pricing Decision</div>
-            <div class="hero-title">{brief['headline']}</div>
+            <div class="eyebrow">Pricing Decision Brief</div>
+            <div class="hero-title">Should we approve this recommended campaign?</div>
             <p class="hero-copy">
-                {brief['tradeoff_summary']} This demo starts after demand forecasting:
+                {brief['headline']} {brief['tradeoff_summary']} This demo starts after demand forecasting:
                 the optimizer receives precomputed demand responses at discrete discount choices.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_page_intro(plan: PlanBundle) -> None:
+    st.markdown("### What you are looking at")
+    st.markdown(
+        '<p class="section-copy">This page is a pricing recommendation briefing, not a forecasting build. '
+        'The solver chooses one allowed discount for each SKU using prepared demand-response inputs, then the assistant helps you understand or stress-test the result without changing it.</p>',
+        unsafe_allow_html=True,
+    )
+    intro_cols = st.columns(2)
+    with intro_cols[0]:
+        _note_card(
+            "What Decision Is Being Made",
+            f"{plan.brief['decision']} The current demo focuses on promotion planning through discrete discount choices.",
+        )
+    with intro_cols[1]:
+        _note_card(
+            "What You Can Ask",
+            "Ask for a summary, ask why one product got its discount, ask why another allowed discount was not chosen, or run one bounded what-if. The recommended campaign stays fixed.",
+        )
+
+
+def _render_headline_metrics(plan: PlanBundle) -> None:
+    official = plan.official.summary
+    current = plan.current_price.summary
+    brief = plan.brief
+
+    st.markdown("### Recommendation in one view")
+    st.markdown(
+        '<p class="section-copy">These are the three numbers to understand before looking at individual products.</p>',
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(3)
+    with cols[0]:
+        _kpi_card(
+            "Products promoted",
+            _format_count(official["promoted_products"]),
+            f"{_format_count(official['protected_products'])} products stay protected at low or zero discount.",
+        )
+    with cols[1]:
+        _kpi_card(
+            "Competitor mismatch improvement",
+            _format_decimal(brief["gap_improvement_vs_current"]),
+            f"Score moves from {_format_decimal(current['weighted_competitor_gap'])} to {_format_decimal(official['weighted_competitor_gap'])}. Lower is better.",
+        )
+    with cols[2]:
+        _kpi_card(
+            "Gross-profit trade-off",
+            _format_currency(brief["profit_vs_current"]),
+            f"Revenue changes by {_format_currency(brief['revenue_vs_current'])} versus current pricing.",
+        )
+
+    st.markdown(
+        f"""
+        <div class="journey-card">
+            The campaign uses {_format_pct(official["budget_utilization_pct"])} of the markdown budget against a limit of
+            {_format_pct(brief["budget_limit_pct"])}. There are {_format_count(brief["inventory_tight_products"])} inventory-tight
+            products, so some discounts stay shallow to protect stock.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_discount_mix(plan: PlanBundle) -> None:
+    distribution = _discount_distribution(plan)
+    st.markdown("### Discount mix")
+    st.markdown(
+        '<p class="section-copy">This shows how the recommended campaign is distributed across the allowed discount ladder.</p>',
+        unsafe_allow_html=True,
+    )
+    if distribution.empty:
+        st.info("No selected products were found for this scenario.")
+        return
+    chart = distribution.set_index("Discount")
+    st.bar_chart(chart[["Products"]], color="#c75b2d", height=260)
+
+
+def _render_review_cases(cases: list[dict[str, object]]) -> None:
+    if not cases:
+        return
+    st.markdown("### Three products worth reviewing first")
+    st.markdown(
+        '<p class="section-copy">The page surfaces one product for competitor pressure, one for inventory protection, and one for the biggest profit sacrifice. This keeps the first review pass focused.</p>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(len(cases))
+    for idx, case in enumerate(cases):
+        metric_value, metric_caption = _case_metric_label(case)
+        with cols[idx]:
+            st.markdown(
+                f"""
+                <div class="case-card">
+                    <div class="eyebrow">{case['title']}</div>
+                    <div class="case-title">{case['product_label']}</div>
+                    <p class="note-copy">{case['description']}</p>
+                    <div class="case-metric">{metric_value}</div>
+                    <p class="note-copy">{metric_caption}</p>
+                    <p class="note-copy">Recommended discount: {_format_pct(float(case['discount_pct']))}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def _render_product_spotlight(
+    plan: PlanBundle,
+    planner: PricingDecisionService,
+    cases: list[dict[str, object]],
+) -> None:
+    st.markdown("### Inspect one product")
+    st.markdown(
+        '<p class="section-copy">Use this section when you want to understand one recommendation in more detail.</p>',
+        unsafe_allow_html=True,
+    )
+
+    product_labels = {row["product_label"]: row["upc"] for row in plan.catalog}
+    label_options = list(product_labels.keys())
+    default_upc = str(cases[0]["upc"]) if cases else str(plan.catalog[0]["upc"])
+    default_label = next(
+        (row["product_label"] for row in plan.catalog if row["upc"] == default_upc),
+        label_options[0],
+    )
+    selected_label = st.selectbox(
+        "Product",
+        label_options,
+        index=label_options.index(default_label),
+        help="Start with one of the highlighted products, then browse the rest of the portfolio if needed.",
+    )
+    selected_upc = product_labels[selected_label]
+    case = next((item for item in cases if item["upc"] == selected_upc), None)
+    dossier = planner.get_sku_dossier(plan.official.run_id, selected_upc)
+
+    if case:
+        metric_value, metric_caption = _case_metric_label(case)
+        st.markdown(
+            f"""
+            <div class="journey-card">
+                <strong>{case['title']}:</strong> {case['description']} For this product, the featured signal is
+                {metric_value} ({metric_caption}).
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    meta_cols = st.columns(2)
+    with meta_cols[0]:
+        _note_card(
+            "Commercial Context",
+            f"{dossier['product']['product_label']} sits in {dossier['product']['category']} / {dossier['product']['sub_category']}. "
+            f"It is treated as a {dossier['product']['role']} item with synthetic archetype {dossier['product']['archetype']}.",
+        )
+    with meta_cols[1]:
+        _note_card(
+            "Competitor And Inventory Context",
+            f"Competitor price is {_format_currency(dossier['context']['competitor_price'] or 0)} with tolerance {_format_pct(dossier['context']['competitor_tolerance_pct'] or 0)}. "
+            f"Inventory starts at {_format_count(dossier['context']['on_hand_units'] or 0)} on hand plus {_format_count(dossier['context']['inbound_units'] or 0)} inbound, with safety stock {_format_count(dossier['context']['safety_stock_units'] or 0)}.",
+        )
+
+    cols = st.columns(3)
+    with cols[0]:
+        _kpi_card(
+            "Recommended discount",
+            _format_pct(dossier["selected"]["discount_pct"]),
+            f"Recommended price {_format_currency(dossier['selected']['candidate_price'])}",
+        )
+    with cols[1]:
+        _kpi_card(
+            "Current price point",
+            _format_pct(dossier["current"]["discount_pct"]),
+            f"Current price {_format_currency(dossier['current']['candidate_price'])}",
+        )
+    with cols[2]:
+        _kpi_card(
+            "Best local profit point",
+            _format_pct(dossier["local_best_feasible"]["discount_pct"]),
+            f"Price {_format_currency(dossier['local_best_feasible']['candidate_price'])}",
+        )
+
+    st.markdown(
+        f"""
+        <div class="journey-card">
+            Versus current pricing, this recommendation changes gross profit by {_format_currency(dossier['selected_vs_current']['gross_profit'])},
+            revenue by {_format_currency(dossier['selected_vs_current']['revenue'])}, and competitor mismatch score by
+            {_format_decimal(dossier['selected_vs_current']['competitor_gap'])}. Versus the best local profit point, the final choice may still be different because the solver is balancing the full portfolio budget, competitor position, and stock protection.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    alternatives = pd.DataFrame(dossier["alternatives"])
+    chart_frame = alternatives.copy()
+    chart_frame["discount_label"] = (chart_frame["discount_pct"] * 100).round(0).astype(int).astype(str) + "%"
+    chart_frame = chart_frame.set_index("discount_label")
+    chart_cols = st.columns(2)
+    with chart_cols[0]:
+        st.caption("Expected gross profit by allowed discount for this SKU.")
+        st.line_chart(chart_frame[["gross_profit"]], color=["#c75b2d"], height=240)
+    with chart_cols[1]:
+        st.caption("Expected units by allowed discount from the prepared demand-response object.")
+        st.line_chart(chart_frame[["expected_units"]], color=["#49775c"], height=240)
+
+    with st.expander("Show full discount ladder for this product", expanded=False):
+        st.caption("Hard-Rule Valid tells you whether a candidate survives margin, inventory, and maximum-discount checks before the portfolio optimization starts.")
+        st.dataframe(_alternate_candidates_table(alternatives), use_container_width=True, hide_index=True)
+
+
+def _render_assistant(plan: PlanBundle, conversation: PricingConversationService) -> None:
+    st.markdown("### Ask and simulate")
+    st.markdown(
+        '<p class="section-copy">The assistant accepts normal chat input, classifies it into a supported scenario, and either explains the recommendation or runs a separate what-if solve. The recommended campaign never changes.</p>',
+        unsafe_allow_html=True,
+    )
+
+    examples = _supported_question_examples(plan)
+    example_html = "".join([f"<li>{item}</li>" for item in examples])
+    st.markdown(
+        f"""
+        <div class="assistant-card">
+            <div class="eyebrow">Supported question scope</div>
+            <p class="note-copy">Try questions in this style:</p>
+            <ul>{example_html}</ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    chat_key = f"chat_history_{plan.scenario_id}"
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = []
+
+    for turn in st.session_state[chat_key][-3:]:
+        _render_assistant_turn(turn)
+
+    prompt = st.chat_input("Ask about the recommendation or try one bounded what-if.")
+    if prompt:
+        turn = conversation.handle_question(plan, prompt)
+        payload = {
+            "question": prompt,
+            "response_text": turn.response_text,
+            "intent": turn.intent,
+            "evidence": turn.evidence,
+            "presentation": turn.presentation,
+        }
+        st.session_state[chat_key].append(payload)
+        st.session_state[f"latest_audit_{plan.scenario_id}"] = payload
+        st.rerun()
+
+
+def _render_technical_evidence(plan: PlanBundle) -> None:
+    with st.expander("Show technical evidence", expanded=False):
+        st.caption("Use this section when you want the full optimizer audit, the complete recommendation table, or the latest assistant evidence payload.")
+        st.subheader("Benchmark comparison")
+        st.dataframe(_benchmark_table(plan), use_container_width=True, hide_index=True)
+
+        st.subheader("Full recommendation table")
+        st.dataframe(_recommendation_table(plan), use_container_width=True, hide_index=True)
+
+        st.subheader("Solver phases")
+        st.dataframe(_phase_table(plan.official), use_container_width=True, hide_index=True)
+        st.caption(f"Recommended campaign run id: `{plan.official.run_id}`")
+        st.caption(f"Profit-first benchmark run id: `{plan.profit_first.run_id}`")
+
+        glossary_cols = st.columns(2)
+        with glossary_cols[0]:
+            st.subheader("Data provenance")
+            st.dataframe(pd.DataFrame(DATA_PROVENANCE_ROWS), use_container_width=True, hide_index=True)
+        with glossary_cols[1]:
+            st.subheader("Glossary")
+            st.dataframe(pd.DataFrame(GLOSSARY_ROWS), use_container_width=True, hide_index=True)
+
+        lower = st.columns(2)
+        with lower[0]:
+            st.subheader("Strategic roles")
+            st.dataframe(
+                pd.DataFrame([{"Role": key, "Meaning": value} for key, value in ROLE_GUIDE.items()]),
+                use_container_width=True,
+                hide_index=True,
+            )
+        with lower[1]:
+            st.subheader("Synthetic archetypes")
+            st.dataframe(
+                pd.DataFrame([{"Archetype": key, "Meaning": value} for key, value in ARCHETYPE_GUIDE.items()]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        latest_audit = st.session_state.get(f"latest_audit_{plan.scenario_id}")
+        if latest_audit:
+            st.subheader("Latest assistant intent and evidence")
+            st.json(
+                {
+                    "intent": latest_audit["intent"],
+                    "presentation": latest_audit["presentation"],
+                    "evidence": latest_audit["evidence"],
+                }
+            )
 
 
 def _render_decision_brief(plan: PlanBundle) -> None:
@@ -816,7 +1202,7 @@ def _render_assistant_turn(turn: dict[str, object]) -> None:
 
         comparison = turn["evidence"].get("comparison") if isinstance(turn["evidence"], dict) else None
         if comparison:
-            st.caption(f"Official proposal unchanged. Comparison run id: `{turn['evidence'].get('what_if_run_id', 'n/a')}`")
+            st.caption(f"Recommended campaign unchanged. Comparison run id: `{turn['evidence'].get('what_if_run_id', 'n/a')}`")
             if comparison.get("comparable") is False:
                 st.warning("This what-if scenario is infeasible under the current hard rules.")
                 conflicts = pd.DataFrame((turn["evidence"].get("infeasibility") or {}).get("lock_conflicts", []))
@@ -934,6 +1320,17 @@ def _render_method_and_audit(plan: PlanBundle) -> None:
             )
 
 
+def _render_single_page(plan: PlanBundle, planner: PricingDecisionService, conversation: PricingConversationService) -> None:
+    cases = _review_cases(plan, planner)
+    _render_page_intro(plan)
+    _render_headline_metrics(plan)
+    _render_discount_mix(plan)
+    _render_review_cases(cases)
+    _render_product_spotlight(plan, planner, cases)
+    _render_assistant(plan, conversation)
+    _render_technical_evidence(plan)
+
+
 def main() -> None:
     if not DB_PATH.exists():
         st.error("Database not found. Run the ingest and scenario generation scripts first.")
@@ -946,50 +1343,32 @@ def main() -> None:
             return
 
         scenario_labels = _scenario_options(scenarios)
-        selected_scenario = st.sidebar.selectbox(
-            "Scenario",
-            scenarios["scenario_id"].tolist(),
-            format_func=lambda value: scenario_labels[value],
-        )
-        scenario_row = scenarios[scenarios["scenario_id"] == selected_scenario].iloc[0]
+        default_scenario = "inventory_stress_v1" if "inventory_stress_v1" in scenarios["scenario_id"].tolist() else scenarios["scenario_id"].iloc[0]
+        selected_scenario = st.session_state.get("selected_scenario_id", default_scenario)
+        if selected_scenario not in scenario_labels:
+            selected_scenario = default_scenario
 
         planner = PricingDecisionService(conn)
         conversation = PricingConversationService(planner)
         plan = planner.build_plan_bundle(selected_scenario)
-
-        st.sidebar.caption(f"Profile: {scenario_row['profile_id'] or 'demo'}")
-        st.sidebar.caption(f"Budget limit: {_format_pct(float(scenario_row['budget_pct']))}")
-        st.sidebar.caption(f"Safety stock: {_format_pct(float(scenario_row['safety_stock_pct']))}")
-        st.sidebar.markdown("The official proposal is fixed. Every what-if runs on a separate child solve.")
-        with st.sidebar.expander("Scenario story", expanded=True):
-            st.write(_scenario_explainer(selected_scenario))
-        with st.sidebar.expander("What this app can do", expanded=False):
-            st.markdown(
-                """
-                - explain the official proposal
-                - inspect one product decision
-                - answer why or why not for one allowed discount
-                - run one bounded what-if without changing the official proposal
-                """
-            )
-
         _render_hero(plan)
-        stage = st.radio(
-            "Workflow",
-            _stage_options(),
-            horizontal=True,
-            label_visibility="collapsed",
-            key=f"stage_{selected_scenario}",
-        )
-
-        if stage == "1. Decision Brief":
-            _render_decision_brief(plan)
-        elif stage == "2. Product Decisions":
-            _render_product_decisions(plan, planner)
-        elif stage == "3. Ask & Simulate":
-            _render_ask_and_simulate(plan, conversation)
-        else:
-            _render_method_and_audit(plan)
+        with st.expander("Change demo scenario", expanded=False):
+            scenario_choice = st.selectbox(
+                "Scenario",
+                scenarios["scenario_id"].tolist(),
+                index=scenarios["scenario_id"].tolist().index(selected_scenario),
+                format_func=lambda value: scenario_labels[value],
+            )
+            selected_row = scenarios[scenarios["scenario_id"] == scenario_choice].iloc[0]
+            st.caption(_scenario_explainer(scenario_choice))
+            st.caption(
+                f"Profile: {selected_row['profile_id'] or 'demo'} | Budget limit: {_format_pct(float(selected_row['budget_pct']))} | Safety stock: {_format_pct(float(selected_row['safety_stock_pct']))}"
+            )
+        if scenario_choice != selected_scenario:
+            st.session_state["selected_scenario_id"] = scenario_choice
+            st.rerun()
+        st.session_state["selected_scenario_id"] = selected_scenario
+        _render_single_page(plan, planner, conversation)
 
 
 if __name__ == "__main__":
