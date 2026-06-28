@@ -10,7 +10,6 @@ def test_plan_bundle_provides_benchmarks(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="planner_bundle_test",
             scenario_name="Planner Bundle Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -18,7 +17,7 @@ def test_plan_bundle_provides_benchmarks(seeded_conn) -> None:
     bundle = service.build_plan_bundle("planner_bundle_test")
 
     assert bundle.official.status == "optimal"
-    assert bundle.profit_first.status == "optimal"
+    assert bundle.position_first.status == "optimal"
     assert bundle.current_price.status in {"ready", "violations_detected"}
     assert bundle.current_price.summary["selected_products"] == bundle.official.summary["selected_products"]
     assert (
@@ -37,7 +36,6 @@ def test_counterfactual_runs_are_cached_and_immutable(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="planner_counterfactual_test",
             scenario_name="Planner Counterfactual Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -92,7 +90,6 @@ def test_counterfactual_infeasibility_returns_diagnostics_not_fake_deltas(seeded
         ScenarioSettings(
             scenario_id="planner_infeasible_cf_test",
             scenario_name="Planner Infeasible CF Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -117,7 +114,6 @@ def test_sku_dossier_exposes_selected_current_and_local_best(seeded_conn) -> Non
         ScenarioSettings(
             scenario_id="planner_dossier_test",
             scenario_name="Planner Dossier Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -130,3 +126,35 @@ def test_sku_dossier_exposes_selected_current_and_local_best(seeded_conn) -> Non
     assert dossier["current"]["candidate_rank"] >= 1
     assert dossier["local_best_feasible"]["candidate_rank"] >= 1
     assert any(item["is_selected"] for item in dossier["alternatives"])
+
+
+def test_plan_bundle_refreshes_when_candidate_inputs_change(seeded_conn) -> None:
+    conn, dataset_version_id = seeded_conn
+    build_demo_scenario(
+        conn,
+        dataset_version_id,
+        ScenarioSettings(
+            scenario_id="planner_refresh_test",
+            scenario_name="Planner Refresh Test",
+        ),
+    )
+
+    service = PricingDecisionService(conn)
+    first = service.build_plan_bundle("planner_refresh_test")
+
+    conn.execute(
+        """
+        UPDATE candidate_outcomes
+        SET gross_profit = gross_profit + 12.5
+        WHERE scenario_id = ?
+          AND upc = '1001'
+          AND candidate_rank = 1
+        """,
+        ("planner_refresh_test",),
+    )
+    conn.commit()
+
+    second = service.build_plan_bundle("planner_refresh_test")
+
+    assert second.official.run_id != first.official.run_id
+    assert "__refresh__" in second.official.run_id

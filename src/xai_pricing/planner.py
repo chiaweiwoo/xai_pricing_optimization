@@ -14,13 +14,13 @@ from .optimizer import PhaseResult, PricingOptimizer, SolveRequest, SolveResult
 
 OBJECTIVE_ORDER_LABELS = {
     "official": (
-        "Minimize weighted competitor gap",
-        "Maximize gross profit within that competitor outcome",
+        "Maximize expected gross profit",
+        "Keep competitor price gaps as small as possible within that profit result",
         "Prefer shallower discounts when the earlier phases tie",
     ),
-    "profit_first": (
-        "Maximize gross profit",
-        "Minimize weighted competitor gap within that profit outcome",
+    "position_first": (
+        "Minimize weighted competitor gap",
+        "Maximize gross profit within that competitor-position result",
         "Prefer shallower discounts when the earlier phases tie",
     ),
 }
@@ -40,7 +40,7 @@ class PlanBundle:
     scenario_id: str
     scenario: dict[str, Any]
     official: SolveResult
-    profit_first: SolveResult
+    position_first: SolveResult
     current_price: BenchmarkResult
     theoretical_ceiling: BenchmarkResult
     brief: dict[str, Any]
@@ -72,13 +72,13 @@ class PricingDecisionService:
                 )
             )
         )
-        profit_first = self._enrich_result(
+        position_first = self._enrich_result(
             self.ensure_solver_run(
                 SolveRequest(
                     scenario_id=scenario_id,
-                    run_id=f"{scenario_id}__benchmark_profit_first",
+                    run_id=f"{scenario_id}__benchmark_position_first",
                     run_kind="benchmark",
-                    objective_mode="profit_first",
+                    objective_mode="position_first",
                 )
             )
         )
@@ -88,7 +88,7 @@ class PricingDecisionService:
         brief = self._build_plan_brief(
             scenario=scenario,
             official=official,
-            profit_first=profit_first,
+            position_first=position_first,
             current_price=current_price,
             theoretical_ceiling=theoretical_ceiling,
         )
@@ -96,7 +96,7 @@ class PricingDecisionService:
             scenario_id=scenario_id,
             scenario=scenario,
             official=official,
-            profit_first=profit_first,
+            position_first=position_first,
             current_price=current_price,
             theoretical_ceiling=theoretical_ceiling,
             brief=brief,
@@ -107,7 +107,10 @@ class PricingDecisionService:
         if request.run_id is not None:
             existing = self._load_run_row(request.run_id)
             if existing is not None:
-                return self.load_run_result(request.run_id)
+                expected_hash, _, _ = self.optimizer.preview_input_hash(request)
+                if str(existing["input_hash"]) == expected_hash:
+                    return self.load_run_result(request.run_id)
+                request = self._request_with_fresh_run_id(request, expected_hash)
         return self.optimizer.solve(request)
 
     def load_run_result(self, run_id: str) -> SolveResult:
@@ -418,7 +421,6 @@ class PricingDecisionService:
                 "competitor_weight": product.get("competitor_weight"),
                 "on_hand_units": product.get("on_hand_units"),
                 "inbound_units": product.get("inbound_units"),
-                "safety_stock_units": product.get("safety_stock_units"),
             },
             "alternatives": alternatives,
         }
@@ -641,6 +643,7 @@ class PricingDecisionService:
             "revenue": round(float(row["revenue"]), 4),
             "ending_inventory_units": round(float(row["ending_inventory_units"]), 4),
             "inventory_buffer_units": round(float(row["inventory_buffer_units"]), 4),
+            "optimistic_lost_units": round(float(row["optimistic_lost_units"]), 4),
             "gross_margin_pct": round(float(row["gross_margin_pct"]), 4),
             "competitor_index": round(float(row["competitor_index"]), 4)
             if row["competitor_index"] is not None
@@ -696,6 +699,7 @@ class PricingDecisionService:
             "revenue",
             "ending_inventory_units",
             "inventory_buffer_units",
+            "optimistic_lost_units",
             "competitor_gap",
         ]
         return {
@@ -708,13 +712,13 @@ class PricingDecisionService:
         *,
         scenario: dict[str, Any],
         official: SolveResult,
-        profit_first: SolveResult,
+        position_first: SolveResult,
         current_price: BenchmarkResult,
         theoretical_ceiling: BenchmarkResult,
     ) -> dict[str, Any]:
         official_summary = official.summary
         current_summary = current_price.summary
-        profit_first_summary = profit_first.summary
+        position_first_summary = position_first.summary
         gp_vs_current = round(
             float(official_summary["total_gross_profit"]) - float(current_summary["total_gross_profit"]),
             2,
@@ -727,29 +731,26 @@ class PricingDecisionService:
             float(current_summary["weighted_competitor_gap"]) - float(official_summary["weighted_competitor_gap"]),
             4,
         )
-        gp_vs_profit_first = round(
-            float(official_summary["total_gross_profit"]) - float(profit_first_summary["total_gross_profit"]),
+        gp_vs_position_first = round(
+            float(official_summary["total_gross_profit"]) - float(position_first_summary["total_gross_profit"]),
             2,
         )
-        gap_improvement_vs_profit_first = round(
-            float(profit_first_summary["weighted_competitor_gap"]) - float(official_summary["weighted_competitor_gap"]),
+        gap_improvement_vs_position_first = round(
+            float(position_first_summary["weighted_competitor_gap"]) - float(official_summary["weighted_competitor_gap"]),
             4,
         )
         budget_limit = float(scenario["budget_pct"])
         budget_used = float(official_summary["budget_utilization_pct"])
         budget_binding = budget_used >= max(budget_limit - 0.0025, 0.0)
-        strategy = (
-            "price_position_strategy"
-            if gap_improvement_vs_current > 1.0 and gp_vs_profit_first < 0
-            else "balanced_profit_strategy"
-        )
+        strategy = "inventory_aware_profit_strategy" if gp_vs_current >= 0 else "inventory_protection_strategy"
         status = "review_required" if gp_vs_current < 0 else "on_track"
         headline = (
-            f"Protect price position on {int(official_summary['promoted_products'])} promoted SKUs "
-            f"while accepting a {abs(gp_vs_current):,.0f} gross-profit trade-off."
-            if strategy == "price_position_strategy"
-            else f"Improve revenue and competitor position with {int(official_summary['promoted_products'])} promoted SKUs."
+            f"Use the 10% markdown budget on {int(official_summary['promoted_products'])} SKUs "
+            f"while keeping expected demand within current on-hand inventory."
+            if strategy == "inventory_aware_profit_strategy"
+            else f"Protect inventory on {int(official_summary['protected_products'])} SKUs that would stock out under deeper discounts."
         )
+        competitor_tradeoff_tolerance_pct = float(official.diagnostics.get("gross_profit_tradeoff_tolerance_pct", 0.0) or 0.0)
         return {
             "status": status,
             "strategy": strategy,
@@ -757,18 +758,21 @@ class PricingDecisionService:
             "decision": "Set one discrete discount for each SKU for the next pricing cycle.",
             "objective_order": list(OBJECTIVE_ORDER_LABELS.get(official.diagnostics.get("objective_mode", "official"), ())),
             "tradeoff_summary": (
-                "The official proposal is not the highest-profit feasible plan. "
-                "It minimizes weighted competitor gap first, then maximizes gross profit, then avoids extra discount depth."
+                "The official proposal maximizes expected gross profit first, then spends at most a very small gross-profit tolerance to reduce competitor price gaps before preferring shallower discount depth."
+                if competitor_tradeoff_tolerance_pct > 0
+                else "The official proposal maximizes expected gross profit first, then uses competitor price position and shallower discount depth as tie-breakers."
             ),
+            "competitor_tradeoff_tolerance_pct": competitor_tradeoff_tolerance_pct,
             "profit_vs_current": gp_vs_current,
             "revenue_vs_current": revenue_vs_current,
             "gap_improvement_vs_current": gap_improvement_vs_current,
-            "profit_vs_profit_first": gp_vs_profit_first,
-            "gap_improvement_vs_profit_first": gap_improvement_vs_profit_first,
+            "profit_vs_position_first": gp_vs_position_first,
+            "gap_improvement_vs_position_first": gap_improvement_vs_position_first,
             "budget_binding": budget_binding,
             "budget_limit_pct": budget_limit,
             "budget_used_pct": budget_used,
             "inventory_tight_products": int(official_summary["inventory_tight_products"]),
+            "upside_risk_products": int(official_summary.get("upside_risk_products", 0)),
             "promoted_products": int(official_summary["promoted_products"]),
             "protected_products": int(official_summary["protected_products"]),
             "selected_products": int(official_summary["selected_products"]),
@@ -778,7 +782,7 @@ class PricingDecisionService:
             ),
             "next_actions": [
                 "Review the promoted and protected SKU mix before approving the campaign.",
-                "Inspect inventory-tight products to see where stock protection limited discount depth.",
+                "Inspect SKUs with upside stockout risk to see where demand uncertainty still matters.",
                 "Use Ask & Simulate to test one override or one rule change without changing the official proposal.",
             ],
         }
@@ -819,9 +823,26 @@ class PricingDecisionService:
             "status": result.status,
             "invalid_skus": precheck.get("invalid_skus", []),
             "lock_conflicts": precheck.get("lock_conflicts", []),
+            "global_conflicts": precheck.get("global_conflicts", []),
+            "budget_floor": precheck.get("budget_floor"),
             "hard_violation_counts": precheck.get("hard_violation_counts", {}),
             "hard_violation_examples": precheck.get("hard_violation_examples", []),
         }
+
+    def _request_with_fresh_run_id(self, request: SolveRequest, expected_hash: str) -> SolveRequest:
+        base_run_id = request.run_id or self.optimizer._default_run_id(request)
+        return SolveRequest(
+            scenario_id=request.scenario_id,
+            run_id=f"{base_run_id}__refresh__{expected_hash[:8]}",
+            run_kind=request.run_kind,
+            source_run_id=request.source_run_id,
+            objective_mode=request.objective_mode,
+            budget_pct=request.budget_pct,
+            safety_stock_pct=request.safety_stock_pct,
+            min_margin_overrides=request.min_margin_overrides,
+            competitor_tolerance_overrides=request.competitor_tolerance_overrides,
+            exact_discount_locks=request.exact_discount_locks,
+        )
 
     def _deserialize_selection_row(self, row: sqlite3.Row) -> dict[str, Any]:
         evidence = json.loads(row["evidence_json"])
@@ -834,6 +855,7 @@ class PricingDecisionService:
             "expected_units": round(float(row["expected_units"]), 4),
             "ending_inventory_units": round(float(row["ending_inventory_units"]), 4),
             "competitor_gap": round(float(row["competitor_gap"]), 4),
+            "optimistic_lost_units": round(float(evidence.get("optimistic_lost_units", 0.0)), 4),
             "archetype": evidence.get("archetype"),
             "role": evidence.get("strategic_role"),
             **evidence,

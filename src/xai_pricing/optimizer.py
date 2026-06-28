@@ -16,17 +16,19 @@ from .db import json_dumps, utc_now
 
 OBJECTIVE_MODES: dict[str, tuple[tuple[str, str], ...]] = {
     "official": (
-        ("competitor_gap", "min"),
         ("gross_profit", "max"),
+        ("competitor_gap", "min"),
         ("discount_depth", "min"),
     ),
-    "profit_first": (
-        ("gross_profit", "max"),
+    "position_first": (
         ("competitor_gap", "min"),
+        ("gross_profit", "max"),
         ("discount_depth", "min"),
     ),
 }
 SOLVER_NAME = "pulp_highs"
+INPUT_HASH_MODEL_VERSION = "2026-06-28-v2"
+OFFICIAL_GROSS_PROFIT_TOLERANCE_PCT = 0.005
 
 
 @dataclass(frozen=True)
@@ -76,16 +78,21 @@ class PricingOptimizer:
         effective_budget_pct = (
             float(request.budget_pct) if request.budget_pct is not None else float(scenario["budget_pct"])
         )
-        effective_safety_stock_pct = (
-            float(request.safety_stock_pct)
-            if request.safety_stock_pct is not None
-            else float(scenario["safety_stock_pct"])
-        )
-        input_hash = self._input_hash(request, effective_budget_pct, effective_safety_stock_pct)
-
+        effective_safety_stock_pct = float(scenario["safety_stock_pct"])
         candidate_df = self._load_candidate_frame(request.scenario_id)
         if candidate_df.empty:
             raise RuntimeError(f"No candidate_outcomes found for scenario {request.scenario_id}")
+        self._validate_request(
+            request=request,
+            effective_budget_pct=effective_budget_pct,
+            candidate_df=candidate_df,
+        )
+        input_hash = self._input_hash(
+            request,
+            budget_pct=effective_budget_pct,
+            safety_stock_pct=effective_safety_stock_pct,
+            candidate_df=candidate_df,
+        )
 
         working_df, precheck = self._prepare_candidates(
             candidate_df,
@@ -99,6 +106,7 @@ class PricingOptimizer:
             "effective_budget_pct": effective_budget_pct,
             "effective_safety_stock_pct": effective_safety_stock_pct,
             "objective_mode": request.objective_mode,
+            "gross_profit_tradeoff_tolerance_pct": self._gross_profit_tolerance_pct(request.objective_mode),
             "rule_inputs": {
                 "min_margin_overrides": request.min_margin_overrides,
                 "competitor_tolerance_overrides": request.competitor_tolerance_overrides,
@@ -147,6 +155,7 @@ class PricingOptimizer:
                 effective_budget_pct=effective_budget_pct,
                 phase_values=prior_bounds,
                 exact_discount_locks=request.exact_discount_locks,
+                gross_profit_tolerance_pct=self._gross_profit_tolerance_pct(request.objective_mode),
             )
             phase_results.append(phase_result)
             self._insert_phase(run_id, phase_result)
@@ -268,8 +277,8 @@ class PricingOptimizer:
         df["effective_competitor_tolerance_pct"] = (
             df["upc"].map(request.competitor_tolerance_overrides).fillna(df["competitor_tolerance_pct"])
         )
-        df["effective_safety_stock_units"] = df["baseline_units"] * effective_safety_stock_pct
-        df["inventory_buffer_units"] = df["ending_inventory_units"] - df["effective_safety_stock_units"]
+        df["effective_safety_stock_units"] = 0.0
+        df["inventory_buffer_units"] = df["ending_inventory_units"]
         df["margin_valid"] = df["gross_margin_pct"] + 1e-9 >= df["effective_min_margin_pct"]
         df["inventory_valid"] = df["inventory_buffer_units"] + 1e-9 >= 0
         df["discount_valid"] = df["discount_pct"] <= df["max_discount_pct"] + 1e-9
@@ -291,6 +300,7 @@ class PricingOptimizer:
             "eligible_candidate_count": int(df["effective_hard_valid"].sum()),
             "invalid_skus": invalid_upcs,
             "lock_conflicts": [],
+            "global_conflicts": [],
             "promotable_skus": int(
                 df[(df["effective_hard_valid"]) & (df["discount_pct"] > 0)]["upc"].nunique()
             ),
@@ -328,6 +338,23 @@ class PricingOptimizer:
             if precheck["lock_conflicts"]:
                 precheck["status"] = "infeasible"
 
+        budget_floor = self._budget_floor_analysis(
+            df,
+            exact_discount_locks=request.exact_discount_locks,
+            effective_budget_pct=effective_budget_pct,
+        )
+        precheck["budget_floor"] = budget_floor
+        if not budget_floor["feasible"]:
+            precheck["status"] = "infeasible"
+            precheck["global_conflicts"].append(
+                {
+                    "reason": "portfolio_budget",
+                    "minimum_budget_utilization_pct": budget_floor["minimum_budget_utilization_pct"],
+                    "budget_limit_pct": effective_budget_pct,
+                    "examples": budget_floor["tight_examples"],
+                }
+            )
+
         return df, precheck
 
     def _solve_phase(
@@ -340,6 +367,7 @@ class PricingOptimizer:
         effective_budget_pct: float,
         phase_values: dict[str, float],
         exact_discount_locks: dict[str, float],
+        gross_profit_tolerance_pct: float,
     ) -> tuple[PhaseResult, pd.DataFrame]:
         eligible_df = working_df[working_df["effective_hard_valid"]].copy()
         model = pulp.LpProblem(
@@ -399,7 +427,8 @@ class PricingOptimizer:
                     coeff * variable_map[(row.upc, row.candidate_rank)]
                     for coeff, row in zip(coeffs, eligible_df.itertuples(index=False), strict=True)
                 )
-                model += (lhs >= value - 1e-6, "lock_gross_profit")
+                tolerated_value = value * (1 - gross_profit_tolerance_pct)
+                model += (lhs >= tolerated_value - 1e-6, "lock_gross_profit")
 
         objective = self._build_objective(objective_key, eligible_df, variable_map)
         model += objective
@@ -415,6 +444,7 @@ class PricingOptimizer:
             "constraint_count": len(model.constraints),
             "budget_pct": effective_budget_pct,
             "lock_count": len(exact_discount_locks),
+            "gross_profit_tolerance_pct": gross_profit_tolerance_pct,
         }
         phase_result = PhaseResult(
             phase_name=phase_name,
@@ -483,6 +513,7 @@ class PricingOptimizer:
                     "gross_profit": round(float(row.gross_profit), 4),
                     "expected_units": round(float(row.expected_units_capped), 4),
                     "ending_inventory_units": round(float(row.ending_inventory_units), 4),
+                    "optimistic_lost_units": round(float(row.optimistic_lost_units), 4),
                     "competitor_gap": round(float(row.effective_competitor_gap), 4),
                     "archetype": row.archetype,
                     "role": row.strategic_role,
@@ -521,9 +552,8 @@ class PricingOptimizer:
             "weighted_competitor_gap": round(weighted_gap, 4),
             "discount_distribution": discount_distribution,
             "selected_archetypes": archetypes,
-            "inventory_tight_products": int(
-                (selected_df["inventory_buffer_units"] <= selected_df["effective_safety_stock_units"] * 0.2).sum()
-            ),
+            "inventory_tight_products": int((selected_df["ending_inventory_units"] <= selected_df["baseline_units"] * 0.15).sum()),
+            "upside_risk_products": int((selected_df["optimistic_lost_units"] > 0).sum()),
         }
 
     def _insert_run(
@@ -602,6 +632,7 @@ class PricingOptimizer:
                 "effective_safety_stock_units": round(float(row.effective_safety_stock_units), 4),
                 "effective_competitor_gap": round(float(row.effective_competitor_gap), 4),
                 "effective_min_margin_pct": round(float(row.effective_min_margin_pct), 4),
+                "optimistic_lost_units": round(float(row.optimistic_lost_units), 4),
             }
             self.conn.execute(
                 """
@@ -687,15 +718,129 @@ class PricingOptimizer:
             )
         return records
 
+    def preview_input_hash(self, request: SolveRequest) -> tuple[str, float, float]:
+        scenario = self._load_scenario(request.scenario_id)
+        effective_budget_pct = (
+            float(request.budget_pct) if request.budget_pct is not None else float(scenario["budget_pct"])
+        )
+        effective_safety_stock_pct = float(scenario["safety_stock_pct"])
+        candidate_df = self._load_candidate_frame(request.scenario_id)
+        if candidate_df.empty:
+            raise RuntimeError(f"No candidate_outcomes found for scenario {request.scenario_id}")
+        self._validate_request(
+            request=request,
+            effective_budget_pct=effective_budget_pct,
+            candidate_df=candidate_df,
+        )
+        return (
+            self._input_hash(
+                request,
+                budget_pct=effective_budget_pct,
+                safety_stock_pct=effective_safety_stock_pct,
+                candidate_df=candidate_df,
+            ),
+            effective_budget_pct,
+            effective_safety_stock_pct,
+        )
+
+    def _validate_request(
+        self,
+        *,
+        request: SolveRequest,
+        effective_budget_pct: float,
+        candidate_df: pd.DataFrame,
+    ) -> None:
+        if not 0.0 <= effective_budget_pct <= 1.0:
+            raise ValueError("budget_pct must be between 0.0 and 1.0")
+
+        valid_upcs = set(candidate_df["upc"].astype(str).unique().tolist())
+        for upc, margin in request.min_margin_overrides.items():
+            if upc not in valid_upcs:
+                raise ValueError(f"Unknown SKU in min_margin_overrides: {upc}")
+            if not 0.0 <= float(margin) <= 1.0:
+                raise ValueError(f"min_margin_pct override must be between 0.0 and 1.0 for {upc}")
+
+        for upc, tolerance in request.competitor_tolerance_overrides.items():
+            if upc not in valid_upcs:
+                raise ValueError(f"Unknown SKU in competitor_tolerance_overrides: {upc}")
+            if not 0.0 <= float(tolerance) <= 1.0:
+                raise ValueError(f"competitor_tolerance_pct override must be between 0.0 and 1.0 for {upc}")
+
+        for upc, discount in request.exact_discount_locks.items():
+            if upc not in valid_upcs:
+                raise ValueError(f"Unknown SKU in exact_discount_locks: {upc}")
+            if not 0.0 <= float(discount) <= 1.0:
+                raise ValueError(f"Discount lock for {upc} must be between 0.0 and 1.0")
+
+    def _budget_floor_analysis(
+        self,
+        df: pd.DataFrame,
+        *,
+        exact_discount_locks: dict[str, float],
+        effective_budget_pct: float,
+    ) -> dict[str, object]:
+        feasible_df = df[df["effective_hard_valid"]].copy()
+        selected_rows: list[pd.Series] = []
+        for upc, group in feasible_df.groupby("upc"):
+            options = group
+            if upc in exact_discount_locks:
+                options = group[group["discount_pct"].sub(float(exact_discount_locks[upc])).abs() < 1e-9]
+            if options.empty:
+                return {
+                    "feasible": False,
+                    "minimum_budget_coeff": None,
+                    "minimum_budget_utilization_pct": None,
+                    "tight_examples": [],
+                }
+            selected_rows.append(options.sort_values(["budget_coeff", "discount_pct"]).iloc[0])
+
+        floor_df = pd.DataFrame(selected_rows)
+        minimum_budget_coeff = float(floor_df["budget_coeff"].sum()) if not floor_df.empty else 0.0
+        total_markdown = float(floor_df["markdown_investment"].sum()) if not floor_df.empty else 0.0
+        total_list_revenue = float((floor_df["list_price"] * floor_df["expected_units_capped"]).sum()) if not floor_df.empty else 0.0
+        minimum_budget_utilization_pct = 0.0 if total_list_revenue <= 0 else total_markdown / total_list_revenue
+        examples = (
+            floor_df.sort_values(["budget_coeff", "discount_pct"], ascending=[False, False])
+            .head(5)[["upc", "discount_pct", "budget_coeff", "markdown_investment"]]
+            .to_dict("records")
+        )
+        return {
+            "feasible": minimum_budget_coeff <= 1e-9,
+            "minimum_budget_coeff": round(minimum_budget_coeff, 4),
+            "minimum_budget_utilization_pct": round(minimum_budget_utilization_pct, 4),
+            "tight_examples": [
+                {
+                    "upc": str(row["upc"]),
+                    "discount_pct": round(float(row["discount_pct"]), 4),
+                    "budget_coeff": round(float(row["budget_coeff"]), 4),
+                    "markdown_investment": round(float(row["markdown_investment"]), 4),
+                }
+                for row in examples
+            ],
+        }
+
+    def _candidate_frame_digest(self, candidate_df: pd.DataFrame) -> str:
+        ordered = candidate_df.sort_values(["upc", "candidate_rank"]).reset_index(drop=True)
+        payload = ordered.to_dict("records")
+        return hashlib.sha256(json_dumps(payload).encode("utf-8")).hexdigest()
+
+    def _gross_profit_tolerance_pct(self, objective_mode: str) -> float:
+        if objective_mode == "official":
+            return OFFICIAL_GROSS_PROFIT_TOLERANCE_PCT
+        return 0.0
+
     def _input_hash(
         self,
         request: SolveRequest,
         budget_pct: float,
         safety_stock_pct: float,
+        candidate_df: pd.DataFrame,
     ) -> str:
         payload = asdict(request)
+        payload["input_hash_model_version"] = INPUT_HASH_MODEL_VERSION
         payload["budget_pct"] = budget_pct
         payload["safety_stock_pct"] = safety_stock_pct
+        payload["candidate_frame_digest"] = self._candidate_frame_digest(candidate_df)
         return hashlib.sha256(json_dumps(payload).encode("utf-8")).hexdigest()
 
 

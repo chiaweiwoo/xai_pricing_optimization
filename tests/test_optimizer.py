@@ -10,7 +10,6 @@ def test_optimizer_solves_balanced_scenario(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="balanced_test",
             scenario_name="Balanced Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -38,7 +37,6 @@ def test_optimizer_rejects_missing_lock_candidate(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="lock_test",
             scenario_name="Lock Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -62,7 +60,6 @@ def test_optimizer_enforces_valid_discount_lock(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="lock_enforced_test",
             scenario_name="Lock Enforced Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -101,7 +98,6 @@ def test_optimizer_respects_zero_budget_override(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="zero_budget_test",
             scenario_name="Zero Budget Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -122,7 +118,6 @@ def test_optimizer_rejects_duplicate_run_id(seeded_conn) -> None:
         ScenarioSettings(
             scenario_id="immutability_test",
             scenario_name="Immutability Test",
-            profile_id="balanced_campaign_v1",
         ),
     )
 
@@ -137,3 +132,62 @@ def test_optimizer_rejects_duplicate_run_id(seeded_conn) -> None:
         assert "cannot be overwritten" in str(exc)
     else:
         raise AssertionError("Expected duplicate run_id to be rejected")
+
+
+def test_optimizer_rejects_invalid_budget_range(seeded_conn) -> None:
+    conn, dataset_version_id = seeded_conn
+    build_demo_scenario(
+        conn,
+        dataset_version_id,
+        ScenarioSettings(
+            scenario_id="invalid_budget_test",
+            scenario_name="Invalid Budget Test",
+        ),
+    )
+
+    optimizer = PricingOptimizer(conn)
+
+    try:
+        optimizer.solve(SolveRequest(scenario_id="invalid_budget_test", budget_pct=1.25))
+    except ValueError as exc:
+        assert "budget_pct" in str(exc)
+    else:
+        raise AssertionError("Expected invalid budget_pct to be rejected")
+
+
+def test_optimizer_reports_portfolio_budget_conflict_in_precheck(seeded_conn) -> None:
+    conn, dataset_version_id = seeded_conn
+    build_demo_scenario(
+        conn,
+        dataset_version_id,
+        ScenarioSettings(
+            scenario_id="budget_conflict_test",
+            scenario_name="Budget Conflict Test",
+        ),
+    )
+
+    forced_row = conn.execute(
+        """
+        SELECT upc, discount_pct
+        FROM candidate_outcomes
+        WHERE scenario_id = ?
+          AND upc = '1001'
+          AND is_hard_valid = 1
+          AND discount_pct > 0
+        ORDER BY discount_pct DESC
+        LIMIT 1
+        """,
+        ("budget_conflict_test",),
+    ).fetchone()
+
+    optimizer = PricingOptimizer(conn)
+    result = optimizer.solve(
+        SolveRequest(
+            scenario_id="budget_conflict_test",
+            budget_pct=0.0,
+            exact_discount_locks={forced_row["upc"]: float(forced_row["discount_pct"])},
+        )
+    )
+
+    assert result.status == "infeasible_precheck"
+    assert result.diagnostics["precheck"]["global_conflicts"][0]["reason"] == "portfolio_budget"
