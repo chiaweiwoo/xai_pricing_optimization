@@ -48,6 +48,23 @@ The two built-in synthetic scenarios are:
 
 ## What the app now shows
 
+The Streamlit app is now organized as a guided journey for a category manager who is new to this specific project:
+
+- `Decision Brief`: what decision is being made, why the official proposal exists, and the main trade-off to review first
+- `Product Decisions`: which products were promoted or protected, plus one-product inspection with competitor and inventory context
+- `Ask & Simulate`: a bounded conversation layer that explains the fixed proposal or runs a separate what-if solve
+- `Method & Audit`: solver phases, provenance, glossary, and the latest assistant evidence payload
+
+The current official recommendation should be read as a `price-position strategy`, not a pure profit-maximizing plan. In the inventory stress scenario, the official plan:
+
+- promotes 36 of 55 products
+- uses the full 10% markdown budget
+- improves weighted competitor gap from `8.7564` to `0.6653`
+- increases revenue by about `$16,466`
+- sacrifices about `$4,742` gross profit versus keeping current prices
+
+The app keeps five core reference concepts visible:
+
 - `Official proposal`: competitor-first, then gross profit, then shallower discount depth
 - `Profit-first feasible`: respects the same hard rules and 10% markdown budget, but maximizes gross profit first
 - `Current-price baseline`: what happens if we keep the current price points

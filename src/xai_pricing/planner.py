@@ -12,6 +12,20 @@ from .db import json_dumps
 from .optimizer import PhaseResult, PricingOptimizer, SolveRequest, SolveResult
 
 
+OBJECTIVE_ORDER_LABELS = {
+    "official": (
+        "Minimize weighted competitor gap",
+        "Maximize gross profit within that competitor outcome",
+        "Prefer shallower discounts when the earlier phases tie",
+    ),
+    "profit_first": (
+        "Maximize gross profit",
+        "Minimize weighted competitor gap within that profit outcome",
+        "Prefer shallower discounts when the earlier phases tie",
+    ),
+}
+
+
 @dataclass(frozen=True)
 class BenchmarkResult:
     benchmark_id: str
@@ -24,10 +38,13 @@ class BenchmarkResult:
 @dataclass(frozen=True)
 class PlanBundle:
     scenario_id: str
+    scenario: dict[str, Any]
     official: SolveResult
     profit_first: SolveResult
     current_price: BenchmarkResult
     theoretical_ceiling: BenchmarkResult
+    brief: dict[str, Any]
+    catalog: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -44,30 +61,46 @@ class PricingDecisionService:
         self.optimizer = PricingOptimizer(conn)
 
     def build_plan_bundle(self, scenario_id: str) -> PlanBundle:
-        official = self.ensure_solver_run(
-            SolveRequest(
-                scenario_id=scenario_id,
-                run_id=f"{scenario_id}__official",
-                run_kind="official",
-                objective_mode="official",
+        scenario = self.load_scenario_context(scenario_id)
+        official = self._enrich_result(
+            self.ensure_solver_run(
+                SolveRequest(
+                    scenario_id=scenario_id,
+                    run_id=f"{scenario_id}__official",
+                    run_kind="official",
+                    objective_mode="official",
+                )
             )
         )
-        profit_first = self.ensure_solver_run(
-            SolveRequest(
-                scenario_id=scenario_id,
-                run_id=f"{scenario_id}__benchmark_profit_first",
-                run_kind="benchmark",
-                objective_mode="profit_first",
+        profit_first = self._enrich_result(
+            self.ensure_solver_run(
+                SolveRequest(
+                    scenario_id=scenario_id,
+                    run_id=f"{scenario_id}__benchmark_profit_first",
+                    run_kind="benchmark",
+                    objective_mode="profit_first",
+                )
             )
         )
         current_price = self.build_current_price_benchmark(scenario_id)
         theoretical_ceiling = self.build_theoretical_ceiling_benchmark(scenario_id)
-        return PlanBundle(
-            scenario_id=scenario_id,
+        catalog = self.load_product_catalog(scenario_id)
+        brief = self._build_plan_brief(
+            scenario=scenario,
             official=official,
             profit_first=profit_first,
             current_price=current_price,
             theoretical_ceiling=theoretical_ceiling,
+        )
+        return PlanBundle(
+            scenario_id=scenario_id,
+            scenario=scenario,
+            official=official,
+            profit_first=profit_first,
+            current_price=current_price,
+            theoretical_ceiling=theoretical_ceiling,
+            brief=brief,
+            catalog=catalog,
         )
 
     def ensure_solver_run(self, request: SolveRequest) -> SolveResult:
@@ -115,7 +148,7 @@ class PricingDecisionService:
             ).fetchall()
         ]
         summary = diagnostics.get("summary", {"selected_products": len(selections)})
-        return SolveResult(
+        result = SolveResult(
             run_id=run_id,
             scenario_id=run_row["scenario_id"],
             status=run_row["status"],
@@ -124,6 +157,143 @@ class PricingDecisionService:
             diagnostics=diagnostics,
             selections=selections,
         )
+        return self._enrich_result(result)
+
+    def load_scenario_context(self, scenario_id: str) -> dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT
+                scenario_id,
+                scenario_name,
+                profile_id,
+                budget_pct,
+                safety_stock_pct,
+                planning_week_end,
+                objective,
+                notes_json
+            FROM scenarios
+            WHERE scenario_id = ?
+            """,
+            (scenario_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Scenario not found: {scenario_id}")
+        notes = json.loads(row["notes_json"]) if row["notes_json"] else {}
+        return {
+            "scenario_id": row["scenario_id"],
+            "scenario_name": row["scenario_name"],
+            "profile_id": row["profile_id"],
+            "budget_pct": float(row["budget_pct"]),
+            "safety_stock_pct": float(row["safety_stock_pct"]),
+            "planning_week_end": row["planning_week_end"],
+            "objective": row["objective"],
+            "notes": notes,
+        }
+
+    def load_product_catalog(self, scenario_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                p.scenario_id,
+                p.upc,
+                prod.description,
+                prod.manufacturer,
+                prod.category,
+                prod.sub_category,
+                prod.product_size,
+                p.strategic_role,
+                p.archetype,
+                p.current_price,
+                p.reference_price,
+                p.unit_cost,
+                p.min_margin_pct,
+                p.max_discount_pct,
+                p.competitor_tolerance_pct,
+                p.competitor_weight,
+                comp.competitor_price,
+                comp.competitor_index,
+                d.baseline_units,
+                i.on_hand_units,
+                i.inbound_units,
+                i.safety_stock_units
+            FROM product_context p
+            JOIN products prod
+              ON prod.upc = p.upc
+            JOIN demand_models d
+              ON d.scenario_id = p.scenario_id
+             AND d.upc = p.upc
+            JOIN inventory_positions i
+              ON i.scenario_id = p.scenario_id
+             AND i.upc = p.upc
+            LEFT JOIN competitor_prices comp
+              ON comp.scenario_id = p.scenario_id
+             AND comp.upc = p.upc
+            WHERE p.scenario_id = ?
+            ORDER BY prod.category, prod.sub_category, prod.description, p.upc
+            """,
+            (scenario_id,),
+        ).fetchall()
+        catalog: list[dict[str, Any]] = []
+        for row in rows:
+            catalog.append(
+                {
+                    "scenario_id": row["scenario_id"],
+                    "upc": row["upc"],
+                    "description": row["description"],
+                    "manufacturer": row["manufacturer"],
+                    "category": row["category"],
+                    "sub_category": row["sub_category"],
+                    "product_size": row["product_size"],
+                    "product_label": self._product_label(
+                        row["description"],
+                        row["product_size"],
+                        row["upc"],
+                    ),
+                    "role": row["strategic_role"],
+                    "archetype": row["archetype"],
+                    "current_price": round(float(row["current_price"]), 2),
+                    "reference_price": round(float(row["reference_price"]), 2),
+                    "unit_cost": round(float(row["unit_cost"]), 4),
+                    "min_margin_pct": round(float(row["min_margin_pct"]), 4),
+                    "max_discount_pct": round(float(row["max_discount_pct"]), 4),
+                    "competitor_tolerance_pct": round(float(row["competitor_tolerance_pct"]), 4),
+                    "competitor_weight": int(row["competitor_weight"]),
+                    "competitor_price": round(float(row["competitor_price"]), 2)
+                    if row["competitor_price"] is not None
+                    else None,
+                    "competitor_index_current": round(float(row["competitor_index"]), 4)
+                    if row["competitor_index"] is not None
+                    else None,
+                    "baseline_units": round(float(row["baseline_units"]), 4),
+                    "on_hand_units": round(float(row["on_hand_units"]), 4),
+                    "inbound_units": round(float(row["inbound_units"]), 4),
+                    "safety_stock_units": round(float(row["safety_stock_units"]), 4),
+                }
+            )
+        return catalog
+
+    def get_allowed_discount_buckets(self, scenario_id: str, upc: str | None = None) -> list[float]:
+        if upc is None:
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT discount_pct
+                FROM candidate_outcomes
+                WHERE scenario_id = ?
+                ORDER BY discount_pct
+                """,
+                (scenario_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT discount_pct
+                FROM candidate_outcomes
+                WHERE scenario_id = ? AND upc = ?
+                ORDER BY discount_pct
+                """,
+                (scenario_id, upc),
+            ).fetchall()
+        return [round(float(row["discount_pct"]), 4) for row in rows]
 
     def build_current_price_benchmark(self, scenario_id: str) -> BenchmarkResult:
         working_df, request, scenario = self._build_working_frame(scenario_id)
@@ -198,7 +368,8 @@ class PricingDecisionService:
             .sort_values(["gross_profit", "discount_pct"], ascending=[False, True])
             .iloc[0]
         )
-        alternatives = []
+
+        alternatives: list[dict[str, Any]] = []
         for row in sku_df.sort_values("discount_pct").itertuples(index=False):
             alternatives.append(
                 {
@@ -206,6 +377,13 @@ class PricingDecisionService:
                     "candidate_price": round(float(row.candidate_price), 2),
                     "gross_profit": round(float(row.gross_profit), 4),
                     "expected_units": round(float(row.expected_units_capped), 4),
+                    "revenue": round(float(row.revenue), 4),
+                    "ending_inventory_units": round(float(row.ending_inventory_units), 4),
+                    "gross_margin_pct": round(float(row.gross_margin_pct), 4),
+                    "competitor_index": round(float(row.competitor_index), 4)
+                    if row.competitor_index is not None
+                    else None,
+                    "competitor_gap": round(float(row.effective_competitor_gap), 4),
                     "effective_hard_valid": bool(row.effective_hard_valid),
                     "reason": row.effective_hard_violation_reason,
                     "is_selected": int(row.candidate_rank) == int(selected_row["candidate_rank"]),
@@ -213,14 +391,35 @@ class PricingDecisionService:
                 }
             )
 
+        product = self._catalog_map(run_row["scenario_id"]).get(upc, {"upc": upc, "product_label": upc})
+        selected_evidence = self._row_to_evidence(selected_row)
+        current_evidence = self._row_to_evidence(current_row)
+        local_best_evidence = self._row_to_evidence(local_best_row)
         return {
             "run_id": run_id,
             "scenario_id": run_row["scenario_id"],
             "upc": upc,
+            "product": product,
             "objective_mode": run_row["objective_mode"],
-            "selected": self._row_to_evidence(selected_row),
-            "current": self._row_to_evidence(current_row),
-            "local_best_feasible": self._row_to_evidence(local_best_row),
+            "available_discount_buckets": self.get_allowed_discount_buckets(run_row["scenario_id"], upc),
+            "selected": selected_evidence,
+            "current": current_evidence,
+            "local_best_feasible": local_best_evidence,
+            "selected_vs_current": self._metric_delta(selected_evidence, current_evidence),
+            "selected_vs_local_best": self._metric_delta(selected_evidence, local_best_evidence),
+            "context": {
+                "current_price": product.get("current_price"),
+                "reference_price": product.get("reference_price"),
+                "unit_cost": product.get("unit_cost"),
+                "baseline_units": product.get("baseline_units"),
+                "competitor_price": product.get("competitor_price"),
+                "competitor_index_current": product.get("competitor_index_current"),
+                "competitor_tolerance_pct": product.get("competitor_tolerance_pct"),
+                "competitor_weight": product.get("competitor_weight"),
+                "on_hand_units": product.get("on_hand_units"),
+                "inbound_units": product.get("inbound_units"),
+                "safety_stock_units": product.get("safety_stock_units"),
+            },
             "alternatives": alternatives,
         }
 
@@ -329,11 +528,17 @@ class PricingDecisionService:
         changed["gross_profit_delta"] = changed["gross_profit_candidate"] - changed["gross_profit_base"]
         changed["expected_units_delta"] = changed["expected_units_candidate"] - changed["expected_units_base"]
         changed["competitor_gap_delta"] = changed["competitor_gap_candidate"] - changed["competitor_gap_base"]
-        changed_rows = []
+
+        changed_rows: list[dict[str, Any]] = []
+        product_map = self._catalog_map(base.scenario_id)
         for row in changed.sort_values("gross_profit_delta").itertuples(index=False):
+            product = product_map.get(row.upc, {})
             changed_rows.append(
                 {
                     "upc": row.upc,
+                    "product_label": product.get("product_label", row.upc),
+                    "description": product.get("description"),
+                    "category": product.get("category"),
                     "discount_pct_base": round(float(row.discount_pct_base), 4),
                     "discount_pct_candidate": round(float(row.discount_pct_candidate), 4),
                     "gross_profit_delta": round(float(row.gross_profit_delta), 4),
@@ -435,10 +640,155 @@ class PricingDecisionService:
             "expected_units": round(float(row["expected_units_capped"]), 4),
             "revenue": round(float(row["revenue"]), 4),
             "ending_inventory_units": round(float(row["ending_inventory_units"]), 4),
+            "inventory_buffer_units": round(float(row["inventory_buffer_units"]), 4),
+            "gross_margin_pct": round(float(row["gross_margin_pct"]), 4),
+            "competitor_index": round(float(row["competitor_index"]), 4)
+            if row["competitor_index"] is not None
+            else None,
             "competitor_gap": round(float(row["effective_competitor_gap"]), 4),
             "effective_hard_valid": bool(row["effective_hard_valid"]),
             "reason": row["effective_hard_violation_reason"],
         }
+
+    def _catalog_map(self, scenario_id: str) -> dict[str, dict[str, Any]]:
+        return {row["upc"]: row for row in self.load_product_catalog(scenario_id)}
+
+    def _enrich_result(self, result: SolveResult) -> SolveResult:
+        if not result.selections:
+            return result
+        product_map = self._catalog_map(result.scenario_id)
+        selections: list[dict[str, Any]] = []
+        for row in result.selections:
+            upc = str(row["upc"])
+            product = product_map.get(upc, {})
+            selections.append(
+                {
+                    **row,
+                    "description": row.get("description") or product.get("description"),
+                    "manufacturer": row.get("manufacturer") or product.get("manufacturer"),
+                    "category": row.get("category") or product.get("category"),
+                    "sub_category": row.get("sub_category") or product.get("sub_category"),
+                    "product_size": row.get("product_size") or product.get("product_size"),
+                    "product_label": row.get("product_label")
+                    or product.get("product_label")
+                    or self._product_label(
+                        product.get("description"),
+                        product.get("product_size"),
+                        upc,
+                    ),
+                }
+            )
+        return SolveResult(
+            run_id=result.run_id,
+            scenario_id=result.scenario_id,
+            status=result.status,
+            summary=result.summary,
+            phases=result.phases,
+            diagnostics=result.diagnostics,
+            selections=selections,
+        )
+
+    def _metric_delta(self, candidate: dict[str, Any], base: dict[str, Any]) -> dict[str, float]:
+        metrics = [
+            "candidate_price",
+            "gross_profit",
+            "expected_units",
+            "revenue",
+            "ending_inventory_units",
+            "inventory_buffer_units",
+            "competitor_gap",
+        ]
+        return {
+            metric: round(float(candidate.get(metric, 0.0)) - float(base.get(metric, 0.0)), 4)
+            for metric in metrics
+        }
+
+    def _build_plan_brief(
+        self,
+        *,
+        scenario: dict[str, Any],
+        official: SolveResult,
+        profit_first: SolveResult,
+        current_price: BenchmarkResult,
+        theoretical_ceiling: BenchmarkResult,
+    ) -> dict[str, Any]:
+        official_summary = official.summary
+        current_summary = current_price.summary
+        profit_first_summary = profit_first.summary
+        gp_vs_current = round(
+            float(official_summary["total_gross_profit"]) - float(current_summary["total_gross_profit"]),
+            2,
+        )
+        revenue_vs_current = round(
+            float(official_summary["total_revenue"]) - float(current_summary["total_revenue"]),
+            2,
+        )
+        gap_improvement_vs_current = round(
+            float(current_summary["weighted_competitor_gap"]) - float(official_summary["weighted_competitor_gap"]),
+            4,
+        )
+        gp_vs_profit_first = round(
+            float(official_summary["total_gross_profit"]) - float(profit_first_summary["total_gross_profit"]),
+            2,
+        )
+        gap_improvement_vs_profit_first = round(
+            float(profit_first_summary["weighted_competitor_gap"]) - float(official_summary["weighted_competitor_gap"]),
+            4,
+        )
+        budget_limit = float(scenario["budget_pct"])
+        budget_used = float(official_summary["budget_utilization_pct"])
+        budget_binding = budget_used >= max(budget_limit - 0.0025, 0.0)
+        strategy = (
+            "price_position_strategy"
+            if gap_improvement_vs_current > 1.0 and gp_vs_profit_first < 0
+            else "balanced_profit_strategy"
+        )
+        status = "review_required" if gp_vs_current < 0 else "on_track"
+        headline = (
+            f"Protect price position on {int(official_summary['promoted_products'])} promoted SKUs "
+            f"while accepting a {abs(gp_vs_current):,.0f} gross-profit trade-off."
+            if strategy == "price_position_strategy"
+            else f"Improve revenue and competitor position with {int(official_summary['promoted_products'])} promoted SKUs."
+        )
+        return {
+            "status": status,
+            "strategy": strategy,
+            "headline": headline,
+            "decision": "Set one discrete discount for each SKU for the next pricing cycle.",
+            "objective_order": list(OBJECTIVE_ORDER_LABELS.get(official.diagnostics.get("objective_mode", "official"), ())),
+            "tradeoff_summary": (
+                "The official proposal is not the highest-profit feasible plan. "
+                "It minimizes weighted competitor gap first, then maximizes gross profit, then avoids extra discount depth."
+            ),
+            "profit_vs_current": gp_vs_current,
+            "revenue_vs_current": revenue_vs_current,
+            "gap_improvement_vs_current": gap_improvement_vs_current,
+            "profit_vs_profit_first": gp_vs_profit_first,
+            "gap_improvement_vs_profit_first": gap_improvement_vs_profit_first,
+            "budget_binding": budget_binding,
+            "budget_limit_pct": budget_limit,
+            "budget_used_pct": budget_used,
+            "inventory_tight_products": int(official_summary["inventory_tight_products"]),
+            "promoted_products": int(official_summary["promoted_products"]),
+            "protected_products": int(official_summary["protected_products"]),
+            "selected_products": int(official_summary["selected_products"]),
+            "theoretical_headroom_gp": round(
+                float(theoretical_ceiling.summary["total_gross_profit"]) - float(official_summary["total_gross_profit"]),
+                2,
+            ),
+            "next_actions": [
+                "Review the promoted and protected SKU mix before approving the campaign.",
+                "Inspect inventory-tight products to see where stock protection limited discount depth.",
+                "Use Ask & Simulate to test one override or one rule change without changing the official proposal.",
+            ],
+        }
+
+    def _product_label(self, description: str | None, product_size: str | None, upc: str) -> str:
+        if description and product_size:
+            return f"{description} ({product_size})"
+        if description:
+            return description
+        return upc
 
     def _counterfactual_run_id(
         self,
