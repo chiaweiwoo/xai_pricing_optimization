@@ -22,8 +22,10 @@ def test_conversation_supports_plan_summary_without_llm(seeded_conn) -> None:
     turn = service.handle_question(plan, "summarize the proposal")
 
     assert turn.intent["intent"] == "PLAN_SUMMARY"
+    assert turn.intent["scope"]
     assert turn.evidence["official_run_id"] == plan.official.run_id
     assert "gross profit" in turn.response_text.lower()
+    assert "," in turn.response_text
 
 
 def test_conversation_runs_counterfactual_without_mutating_official(seeded_conn) -> None:
@@ -75,3 +77,25 @@ def test_conversation_reports_infeasible_override_cleanly(seeded_conn) -> None:
     assert turn.evidence["comparison"]["comparable"] is False
     assert "infeasible" in turn.response_text.lower()
     assert "official proposal unchanged" in turn.response_text.lower()
+
+
+def test_conversation_help_explains_scope(seeded_conn) -> None:
+    conn, dataset_version_id = seeded_conn
+    build_demo_scenario(
+        conn,
+        dataset_version_id,
+        ScenarioSettings(
+            scenario_id="conversation_help_test",
+            scenario_name="Conversation Help Test",
+            profile_id="balanced_campaign_v1",
+        ),
+    )
+
+    planner = PricingDecisionService(conn)
+    plan = planner.build_plan_bundle("conversation_help_test")
+    service = PricingConversationService(planner)
+
+    turn = service.handle_question(plan, "help")
+
+    assert turn.intent["intent"] == "HELP"
+    assert "supported question scope" in turn.response_text.lower()

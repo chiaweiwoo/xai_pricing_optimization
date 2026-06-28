@@ -22,6 +22,17 @@ SUPPORTED_INTENTS = {
 }
 
 
+INTENT_SCOPE_TEXT = {
+    "PLAN_SUMMARY": "Summarize the official proposal and compare it with key benchmarks.",
+    "WHY_SELECTED": "Explain why one SKU received its selected discount.",
+    "WHY_NOT": "Explain why a different discrete discount was not selected for one SKU.",
+    "OVERRIDE_WHAT_IF": "Force one SKU to a discrete discount and re-solve a separate child scenario.",
+    "RULE_WHAT_IF": "Change one safe rule such as budget, safety stock, minimum margin, or competitor tolerance.",
+    "HELP": "Show supported question types and example prompts.",
+    "UNSUPPORTED": "Question is outside the supported assistant scope.",
+}
+
+
 @dataclass(frozen=True)
 class ConversationTurn:
     question: str
@@ -111,36 +122,47 @@ class PricingConversationService:
             return fallback
 
         prompt = f"""
+You are an intent classifier for a bounded pricing-planning assistant.
+
 Return JSON only.
 
-Classify the planner question into one of:
-- PLAN_SUMMARY
-- WHY_SELECTED
-- WHY_NOT
-- OVERRIDE_WHAT_IF
-- RULE_WHAT_IF
-- HELP
-- UNSUPPORTED
+1. Choose exactly one intent from:
+   - PLAN_SUMMARY
+   - WHY_SELECTED
+   - WHY_NOT
+   - OVERRIDE_WHAT_IF
+   - RULE_WHAT_IF
+   - HELP
+   - UNSUPPORTED
 
-Supported rule what-if types:
-- budget_pct
-- safety_stock_pct
-- min_margin_pct
-- competitor_tolerance_pct
+2. Supported override scope:
+   - exact SKU discount lock
+   - discount must be one of the allowed discrete buckets
 
-Supported override what-if type:
-- exact SKU discount lock using existing discrete discounts only
+3. Supported rule what-if scope:
+   - budget_pct
+   - safety_stock_pct
+   - min_margin_pct
+   - competitor_tolerance_pct
 
-Available scenario context:
-- scenario_id: {plan.scenario_id}
-- official_run_id: {plan.official.run_id}
-- SKU ids: {", ".join(row["upc"] for row in plan.official.selections)}
-- Allowed discount buckets seen in official plan data: {sorted({row["discount_pct"] for row in plan.official.selections})}
+4. Scenario context:
+   - scenario_id: {plan.scenario_id}
+   - official_run_id: {plan.official.run_id}
+   - sku_ids: {", ".join(row["upc"] for row in plan.official.selections)}
+   - allowed_discount_buckets: {sorted({row["discount_pct"] for row in plan.official.selections})}
 
-Return an object with keys:
-intent, upc, discount_pct, rule_name, rule_value, confidence, rationale.
-Use null for missing fields.
-If the request is outside the supported set, return UNSUPPORTED.
+5. Output schema:
+   {{
+     "intent": "...",
+     "upc": "..." | null,
+     "discount_pct": 0.10 | null,
+     "rule_name": "..." | null,
+     "rule_value": 0.08 | null,
+     "confidence": 0.0,
+     "rationale": "short reason"
+   }}
+
+6. If the question is outside the supported scope, return intent = UNSUPPORTED.
 """.strip()
         try:
             candidate = self.llm_client.chat_json(system_prompt=prompt, user_prompt=question)
@@ -176,6 +198,7 @@ If the request is outside the supported set, return UNSUPPORTED.
             "rule_value": rule_value,
             "confidence": candidate.get("confidence", fallback.get("confidence", 0.0)),
             "rationale": candidate.get("rationale", ""),
+            "scope": INTENT_SCOPE_TEXT.get(intent_name, INTENT_SCOPE_TEXT["UNSUPPORTED"]),
         }
         if intent_name in {"WHY_SELECTED", "WHY_NOT", "OVERRIDE_WHAT_IF"} and upc is None:
             return fallback
@@ -314,13 +337,26 @@ If the request is outside the supported set, return UNSUPPORTED.
         if not self.llm_client.configured:
             return fallback
         system_prompt = """
-You are a pricing decision assistant.
-Use only the evidence JSON provided by the user.
-Do not invent metrics, rules, or causal claims.
-Keep the answer short, practical, and business-facing.
-If the evidence is a what-if result, explicitly state that the official proposal is unchanged.
+You are a pricing decision assistant for a bounded pricing-optimization demo.
+
+Response rules:
+1. Use only the evidence JSON provided by the user.
+2. Do not invent metrics, rules, calculations, or causal claims.
+3. Write in a structured business format with short section labels when useful.
+4. Use thousand separators for money and count-like figures.
+5. If the evidence is a what-if result, explicitly state that the official proposal is unchanged.
+6. If the question is unsupported, explain the supported scope instead of improvising.
 """.strip()
-        user_prompt = f"Question: {question}\n\nEvidence JSON:\n{json.dumps(evidence, indent=2)}"
+        user_prompt = (
+            f"Planner question:\n{question}\n\n"
+            f"Detected intent:\n{intent}\n\n"
+            "Write a concise answer with this storytelling order when applicable:\n"
+            "1. What was asked\n"
+            "2. Direct answer\n"
+            "3. Key numbers\n"
+            "4. Interpretation or next step\n\n"
+            f"Evidence JSON:\n{json.dumps(evidence, indent=2)}"
+        )
         try:
             return self.llm_client.chat_text(system_prompt=system_prompt, user_prompt=user_prompt).strip()
         except Exception:
@@ -334,68 +370,129 @@ If the evidence is a what-if result, explicitly state that the official proposal
         pct_value = round(float(pct_match.group(1)) / 100, 4) if pct_match else None
 
         if any(token in lowered for token in ["summary", "overview", "proposal", "plan"]):
-            return {"intent": "PLAN_SUMMARY", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.6}
+            return {"intent": "PLAN_SUMMARY", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.6, "scope": INTENT_SCOPE_TEXT["PLAN_SUMMARY"]}
         if "help" in lowered or "support" in lowered:
-            return {"intent": "HELP", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.7}
+            return {"intent": "HELP", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["HELP"]}
         if "why not" in lowered and upc:
-            return {"intent": "WHY_NOT", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.7}
+            return {"intent": "WHY_NOT", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["WHY_NOT"]}
         if "why" in lowered and upc:
-            return {"intent": "WHY_SELECTED", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.65}
+            return {"intent": "WHY_SELECTED", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.65, "scope": INTENT_SCOPE_TEXT["WHY_SELECTED"]}
         if "what if" in lowered and upc and pct_value is not None:
-            return {"intent": "OVERRIDE_WHAT_IF", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.7}
+            return {"intent": "OVERRIDE_WHAT_IF", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["OVERRIDE_WHAT_IF"]}
         if "budget" in lowered and pct_value is not None:
-            return {"intent": "RULE_WHAT_IF", "upc": None, "discount_pct": None, "rule_name": "budget_pct", "rule_value": pct_value, "confidence": 0.7}
+            return {"intent": "RULE_WHAT_IF", "upc": None, "discount_pct": None, "rule_name": "budget_pct", "rule_value": pct_value, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["RULE_WHAT_IF"]}
         if "safety stock" in lowered and pct_value is not None:
-            return {"intent": "RULE_WHAT_IF", "upc": None, "discount_pct": None, "rule_name": "safety_stock_pct", "rule_value": pct_value, "confidence": 0.7}
+            return {"intent": "RULE_WHAT_IF", "upc": None, "discount_pct": None, "rule_name": "safety_stock_pct", "rule_value": pct_value, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["RULE_WHAT_IF"]}
         if "margin" in lowered and upc and pct_value is not None:
-            return {"intent": "RULE_WHAT_IF", "upc": upc, "discount_pct": None, "rule_name": "min_margin_pct", "rule_value": pct_value, "confidence": 0.7}
+            return {"intent": "RULE_WHAT_IF", "upc": upc, "discount_pct": None, "rule_name": "min_margin_pct", "rule_value": pct_value, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["RULE_WHAT_IF"]}
         if "competitor" in lowered and upc and pct_value is not None:
-            return {"intent": "RULE_WHAT_IF", "upc": upc, "discount_pct": None, "rule_name": "competitor_tolerance_pct", "rule_value": pct_value, "confidence": 0.7}
+            return {"intent": "RULE_WHAT_IF", "upc": upc, "discount_pct": None, "rule_name": "competitor_tolerance_pct", "rule_value": pct_value, "confidence": 0.7, "scope": INTENT_SCOPE_TEXT["RULE_WHAT_IF"]}
 
         # Gentle fallback if a SKU is present but wording is fuzzy.
         if upc in {row["upc"] for row in plan.official.selections}:
-            return {"intent": "WHY_SELECTED", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.4}
-        return {"intent": "UNSUPPORTED", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.2}
+            return {"intent": "WHY_SELECTED", "upc": upc, "discount_pct": pct_value, "rule_name": None, "rule_value": None, "confidence": 0.4, "scope": INTENT_SCOPE_TEXT["WHY_SELECTED"]}
+        return {"intent": "UNSUPPORTED", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.2, "scope": INTENT_SCOPE_TEXT["UNSUPPORTED"]}
+
+    def _format_currency(self, value: float | int) -> str:
+        return f"{float(value):,.2f}"
+
+    def _format_number(self, value: float | int) -> str:
+        return f"{float(value):,.2f}"
+
+    def _format_pct(self, value: float | int) -> str:
+        return f"{float(value):.1%}"
+
+    def _format_gap(self, value: float | int) -> str:
+        return f"{float(value):,.4f}"
 
     def _fallback_narration(self, *, intent: dict[str, Any], evidence: dict[str, Any]) -> str:
         name = intent["intent"]
         if name == "PLAN_SUMMARY":
             official = evidence["official"]
             comparison = evidence["benchmark_comparison"]
-            return (
-                f"Official proposal uses {official['budget_utilization_pct']:.2%} of the 10% markdown budget, "
-                f"promotes {official['promoted_products']} SKUs, and delivers gross profit of "
-                f"{official['total_gross_profit']:.2f}. Versus the current-price baseline it adds "
-                f"{comparison['vs_current_gp']:.2f} gross profit. Versus the profit-first feasible plan it gives up "
-                f"{abs(comparison['vs_profit_first_gp']):.2f} gross profit in exchange for a tighter competitor position."
+            return "\n".join(
+                [
+                    "Intent detected: Plan summary",
+                    "",
+                    "Answer",
+                    f"- Official proposal gross profit: {self._format_currency(official['total_gross_profit'])}",
+                    f"- Revenue: {self._format_currency(official['total_revenue'])}",
+                    f"- Promoted SKUs: {int(official['promoted_products'])}",
+                    f"- Budget used: {self._format_pct(official['budget_utilization_pct'])}",
+                    f"- Weighted competitor gap: {self._format_gap(official['weighted_competitor_gap'])}",
+                    "",
+                    "Story",
+                    f"- Versus the current-price baseline, the official plan changes gross profit by {self._format_currency(comparison['vs_current_gp'])}.",
+                    f"- Versus the profit-first feasible plan, the official plan gives up {self._format_currency(abs(comparison['vs_profit_first_gp']))} of gross profit to stay tighter on competitor position.",
+                    "",
+                    "Scope",
+                    "- You can ask why a SKU got its discount, why not another discrete discount, or run a bounded what-if.",
+                ]
             )
         if name == "WHY_SELECTED":
             dossier = evidence["sku_dossier"]
             selected = dossier["selected"]
             current = dossier["current"]
             local_best = dossier["local_best_feasible"]
-            return (
-                f"SKU {dossier['upc']} is set to {selected['discount_pct']:.0%} because that candidate keeps the plan "
-                f"feasible while landing expected gross profit of {selected['gross_profit']:.2f}. "
-                f"The current price candidate would deliver {current['gross_profit']:.2f}, and the SKU-local best feasible "
-                f"candidate would deliver {local_best['gross_profit']:.2f}. The portfolio still prefers the selected point "
-                f"because the official run prioritizes competitor position before gross profit."
+            return "\n".join(
+                [
+                    f"Intent detected: Why selected for SKU {dossier['upc']}",
+                    "",
+                    "Recommendation",
+                    f"- Selected discount: {self._format_pct(selected['discount_pct'])}",
+                    f"- Selected price: {self._format_currency(selected['candidate_price'])}",
+                    f"- Expected gross profit: {self._format_currency(selected['gross_profit'])}",
+                    "",
+                    "Comparison",
+                    f"- Current-price candidate gross profit: {self._format_currency(current['gross_profit'])}",
+                    f"- SKU-local best feasible gross profit: {self._format_currency(local_best['gross_profit'])}",
+                    "",
+                    "Why this happened",
+                    "- The selected point remains feasible under hard rules and is consistent with the official solve order.",
+                    "- The official run prioritizes competitor position before gross profit, so the portfolio may not choose the SKU-local profit maximum.",
+                ]
             )
         if name == "WHY_NOT":
             dossier = evidence["sku_dossier"]
             target = evidence.get("target_alternative")
             if target is None:
-                return f"I could not map that alternative discount for SKU {dossier['upc']} to an allowed candidate."
+                return "\n".join(
+                    [
+                        f"Intent detected: Why not for SKU {dossier['upc']}",
+                        "",
+                        "Answer",
+                        "- I could not map that request to an allowed discrete discount candidate for this SKU.",
+                        "",
+                        "Scope",
+                        "- Ask about 0%, 5%, 10%, 15%, 20%, or 25%, depending on the scenario candidate set.",
+                    ]
+                )
             if not target["effective_hard_valid"]:
-                return (
-                    f"SKU {dossier['upc']} was not set to {target['discount_pct']:.0%} because that candidate is invalid "
-                    f"under the current rules. The blocking reason is {target['reason']}."
+                return "\n".join(
+                    [
+                        f"Intent detected: Why not for SKU {dossier['upc']}",
+                        "",
+                        "Answer",
+                        f"- {self._format_pct(target['discount_pct'])} was not selected because that candidate is invalid under the current hard rules.",
+                        f"- Blocking reason: {target['reason']}",
+                    ]
                 )
             selected = dossier["selected"]
-            return (
-                f"SKU {dossier['upc']} was not set to {target['discount_pct']:.0%}. That alternative is feasible, but the "
-                f"official plan selected {selected['discount_pct']:.0%}. The alternative would deliver gross profit of "
-                f"{target['gross_profit']:.2f} versus {selected['gross_profit']:.2f} for the selected point."
+            return "\n".join(
+                [
+                    f"Intent detected: Why not for SKU {dossier['upc']}",
+                    "",
+                    "Answer",
+                    f"- Requested alternative: {self._format_pct(target['discount_pct'])}",
+                    f"- Selected discount: {self._format_pct(selected['discount_pct'])}",
+                    "",
+                    "Comparison",
+                    f"- Alternative gross profit: {self._format_currency(target['gross_profit'])}",
+                    f"- Selected gross profit: {self._format_currency(selected['gross_profit'])}",
+                    "",
+                    "Interpretation",
+                    "- The alternative is feasible, but the portfolio still preferred the selected point after considering the official optimization sequence.",
+                ]
             )
         if name in {"OVERRIDE_WHAT_IF", "RULE_WHAT_IF"} and evidence.get("comparison"):
             if evidence["comparison"].get("comparable") is False:
@@ -403,29 +500,81 @@ If the evidence is a what-if result, explicitly state that the official proposal
                 lock_conflicts = infeasibility.get("lock_conflicts", [])
                 if lock_conflicts:
                     first_conflict = lock_conflicts[0]
-                    return (
-                        "This what-if re-solve leaves the official proposal unchanged. "
-                        f"The requested override is infeasible because SKU {first_conflict['upc']} at "
-                        f"{first_conflict['discount_pct']:.0%} conflicts with {first_conflict['reason']}."
+                    return "\n".join(
+                        [
+                            "Intent detected: What-if simulation",
+                            "",
+                            "Result",
+                            "- Official proposal unchanged.",
+                            "- What-if scenario is infeasible.",
+                            "",
+                            "Why it failed",
+                            f"- SKU: {first_conflict['upc']}",
+                            f"- Requested discount: {self._format_pct(first_conflict['discount_pct'])}",
+                            f"- Conflict reason: {first_conflict['reason']}",
+                            "",
+                            "Next step",
+                            "- Try another discrete discount or relax a supported rule such as budget or minimum margin.",
+                        ]
                     )
                 invalid_skus = infeasibility.get("invalid_skus", [])
                 if invalid_skus:
-                    return (
-                        "This what-if re-solve leaves the official proposal unchanged. "
-                        f"The request is infeasible because some SKUs have no valid candidate under the new rules, "
-                        f"including {invalid_skus[0]}."
+                    return "\n".join(
+                        [
+                            "Intent detected: What-if simulation",
+                            "",
+                            "Result",
+                            "- Official proposal unchanged.",
+                            "- What-if scenario is infeasible.",
+                            "",
+                            "Why it failed",
+                            f"- At least one SKU has no valid candidate under the new rules, including {invalid_skus[0]}.",
+                        ]
                     )
-                return (
-                    "This what-if re-solve leaves the official proposal unchanged. "
-                    "The requested scenario is infeasible under the current hard rules."
+                return "\n".join(
+                    [
+                        "Intent detected: What-if simulation",
+                        "",
+                        "Result",
+                        "- Official proposal unchanged.",
+                        "- The requested scenario is infeasible under the current hard rules.",
+                    ]
                 )
             delta = evidence["comparison"]["summary_delta"]
-            return (
-                f"This what-if re-solve leaves the official proposal unchanged. The simulated plan changes "
-                f"{evidence['comparison']['changed_sku_count']} SKUs and moves gross profit by "
-                f"{delta['total_gross_profit']:.2f}, revenue by {delta['total_revenue']:.2f}, and weighted competitor gap by "
-                f"{delta['weighted_competitor_gap']:.4f}."
+            return "\n".join(
+                [
+                    "Intent detected: What-if simulation",
+                    "",
+                    "Result",
+                    "- Official proposal unchanged.",
+                    f"- Changed SKUs in simulated plan: {int(evidence['comparison']['changed_sku_count'])}",
+                    "",
+                    "Portfolio impact",
+                    f"- Gross profit delta: {self._format_currency(delta['total_gross_profit'])}",
+                    f"- Revenue delta: {self._format_currency(delta['total_revenue'])}",
+                    f"- Weighted competitor gap delta: {self._format_gap(delta['weighted_competitor_gap'])}",
+                    "",
+                    "Interpretation",
+                    "- This is a separate child solve used only for comparison against the fixed official proposal.",
+                ]
             )
         if name == "HELP":
-            return "Ask for a plan summary, why a SKU got its discount, why not another discount, or a simple what-if override or rule change."
+            return "\n".join(
+                [
+                    "Supported question scope",
+                    "",
+                    "- Summarize the official proposal.",
+                    "- Explain why one SKU received its selected discount.",
+                    "- Explain why another discrete discount was not selected.",
+                    "- Force one SKU to a discrete discount in a separate what-if run.",
+                    "- Change one safe rule: budget, safety stock, minimum margin, or competitor tolerance.",
+                    "",
+                    "Example prompts",
+                    "- Summarize the proposal",
+                    "- Why is SKU 1111009477 at 15%?",
+                    "- Why not 10% for SKU 1111009477?",
+                    "- What if we force 10% for SKU 1111009477?",
+                    "- What if budget becomes 8%?",
+                ]
+            )
         return evidence.get("message", "That question is outside the supported pricing assistant scope.")

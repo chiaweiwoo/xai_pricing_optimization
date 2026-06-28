@@ -164,6 +164,46 @@ def _format_currency(value: float) -> str:
     return f"{value:,.2f}"
 
 
+def _format_count(value: float | int) -> str:
+    return f"{int(round(float(value))):,}"
+
+
+def _format_decimal(value: float | int, digits: int = 4) -> str:
+    return f"{float(value):,.{digits}f}"
+
+
+def _format_quantity(value: float | int) -> str:
+    return f"{float(value):,.2f}"
+
+
+def _apply_formats(
+    frame: pd.DataFrame,
+    *,
+    currency_cols: list[str] | None = None,
+    pct_cols: list[str] | None = None,
+    decimal_cols: list[str] | None = None,
+    quantity_cols: list[str] | None = None,
+    count_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    formatted = frame.copy()
+    for col in currency_cols or []:
+        if col in formatted.columns:
+            formatted[col] = formatted[col].map(_format_currency)
+    for col in pct_cols or []:
+        if col in formatted.columns:
+            formatted[col] = formatted[col].map(_format_pct)
+    for col in decimal_cols or []:
+        if col in formatted.columns:
+            formatted[col] = formatted[col].map(_format_decimal)
+    for col in quantity_cols or []:
+        if col in formatted.columns:
+            formatted[col] = formatted[col].map(_format_quantity)
+    for col in count_cols or []:
+        if col in formatted.columns:
+            formatted[col] = formatted[col].map(_format_count)
+    return formatted
+
+
 def _load_scenarios(conn) -> pd.DataFrame:
     return pd.read_sql(
         """
@@ -221,8 +261,12 @@ def _bundle_to_benchmark_table(bundle) -> pd.DataFrame:
             "competitor_gap": "Weighted Competitor Gap",
         }
     )
-    frame["Budget Used"] = frame["Budget Used"].map(_format_pct)
-    return frame
+    return _apply_formats(
+        frame,
+        currency_cols=["Gross Profit", "Revenue"],
+        pct_cols=["Budget Used"],
+        decimal_cols=["Weighted Competitor Gap"],
+    )
 
 
 def _phase_table(run) -> pd.DataFrame:
@@ -242,7 +286,7 @@ def _phase_table(run) -> pd.DataFrame:
     if frame.empty:
         return frame
     frame["phase"] = frame["phase"].map(_friendly_phase_name)
-    return frame.rename(
+    frame = frame.rename(
         columns={
             "phase": "Phase",
             "status": "Status",
@@ -251,6 +295,11 @@ def _phase_table(run) -> pd.DataFrame:
             "constraints": "Constraints",
             "variables": "Variables",
         }
+    )
+    return _apply_formats(
+        frame,
+        decimal_cols=["Objective Value"],
+        count_cols=["Duration (ms)", "Constraints", "Variables"],
     )
 
 
@@ -275,8 +324,14 @@ def _recommendation_table(run) -> pd.DataFrame:
             "competitor_gap": "Weighted Competitor Gap",
         }
     )
-    frame["Discount"] = frame["Discount"].map(_format_pct)
-    return frame.sort_values(["Role", "Discount", "Expected Gross Profit"], ascending=[True, False, False])
+    frame = frame.sort_values(["Role", "Discount", "Expected Gross Profit"], ascending=[True, False, False])
+    return _apply_formats(
+        frame,
+        currency_cols=["Recommended Price", "Expected Gross Profit"],
+        pct_cols=["Discount"],
+        decimal_cols=["Weighted Competitor Gap"],
+        quantity_cols=["Expected Units", "Ending Inventory"],
+    )
 
 
 def _friendly_phase_name(raw_phase: str) -> str:
@@ -294,7 +349,7 @@ def _mix_table(run, column: str, title: str) -> pd.DataFrame:
     if frame.empty or column not in frame.columns:
         return pd.DataFrame(columns=[title, "SKU Count"])
     counts = frame[column].fillna("unknown").value_counts().rename_axis(title).reset_index(name="SKU Count")
-    return counts
+    return _apply_formats(counts, count_cols=["SKU Count"])
 
 
 def _scenario_explainer(scenario_row) -> str:
@@ -341,8 +396,61 @@ def _alternate_candidates_table(alternatives: pd.DataFrame) -> pd.DataFrame:
         }
     ).copy()
     if "Discount" in frame.columns:
-        frame["Discount"] = frame["Discount"].map(_format_pct)
+        frame = _apply_formats(
+            frame,
+            currency_cols=["Candidate Price", "Expected Gross Profit"],
+            pct_cols=["Discount"],
+            quantity_cols=["Expected Units"],
+        )
     return frame
+
+
+def _format_delta_table(summary_delta: dict[str, float]) -> pd.DataFrame:
+    labels = {
+        "selected_products": "Selected SKUs",
+        "promoted_products": "Promoted SKUs",
+        "protected_products": "Protected SKUs",
+        "total_revenue": "Revenue",
+        "total_gross_profit": "Gross Profit",
+        "total_markdown_investment": "Markdown Spend",
+        "budget_utilization_pct": "Budget Used",
+        "weighted_competitor_gap": "Weighted Competitor Gap",
+        "inventory_tight_products": "Inventory-tight SKUs",
+    }
+    rows = []
+    for key, value in summary_delta.items():
+        if key in {"total_revenue", "total_gross_profit", "total_markdown_investment"}:
+            formatted_value = _format_currency(value)
+        elif key == "budget_utilization_pct":
+            formatted_value = _format_pct(value)
+        elif key == "weighted_competitor_gap":
+            formatted_value = _format_decimal(value)
+        else:
+            formatted_value = _format_count(value)
+        rows.append({"Metric": labels.get(key, key), "Delta": formatted_value})
+    return pd.DataFrame(rows)
+
+
+def _format_changed_skus(changed: pd.DataFrame) -> pd.DataFrame:
+    if changed.empty:
+        return changed
+    frame = changed.rename(
+        columns={
+            "upc": "SKU",
+            "discount_pct_base": "Official Discount",
+            "discount_pct_candidate": "What-If Discount",
+            "gross_profit_delta": "Gross Profit Delta",
+            "expected_units_delta": "Expected Units Delta",
+            "competitor_gap_delta": "Weighted Competitor Gap Delta",
+        }
+    )
+    return _apply_formats(
+        frame,
+        pct_cols=["Official Discount", "What-If Discount"],
+        currency_cols=["Gross Profit Delta"],
+        decimal_cols=["Weighted Competitor Gap Delta"],
+        quantity_cols=["Expected Units Delta"],
+    )
 
 
 def main() -> None:
@@ -389,11 +497,11 @@ def main() -> None:
         official = plan.official.summary
         comparison_gp = official["total_gross_profit"] - plan.current_price.summary["total_gross_profit"]
         cols = st.columns(5)
-        cols[0].metric("Official GP", f"{official['total_gross_profit']:.2f}")
-        cols[1].metric("Revenue", f"{official['total_revenue']:.2f}")
-        cols[2].metric("Promoted SKUs", f"{official['promoted_products']}")
+        cols[0].metric("Official GP", _format_currency(official["total_gross_profit"]))
+        cols[1].metric("Revenue", _format_currency(official["total_revenue"]))
+        cols[2].metric("Promoted SKUs", _format_count(official["promoted_products"]))
         cols[3].metric("Budget Used", _format_pct(float(official["budget_utilization_pct"])))
-        cols[4].metric("GP vs Current", f"{comparison_gp:.2f}")
+        cols[4].metric("GP vs Current", _format_currency(comparison_gp))
         st.caption(
             "Gross profit is the optimization value most business users care about. "
             "Budget used is markdown spend divided by list-price revenue. "
@@ -490,18 +598,24 @@ def main() -> None:
         with chat_tab:
             st.subheader("Decision assistant")
             st.caption(
-                "This is a bounded assistant, not an open chatbot. It can summarize the proposal, explain one SKU, compare against another discrete discount, or run a safe what-if in a separate child solve."
+                "Type a free-text business question. The assistant will classify your message into a supported intent, gather deterministic solver evidence, and answer within that scope."
             )
             sample_upc = plan.official.selections[0]["upc"] if plan.official.selections else "SKU"
             sample_discount = int(round(plan.official.selections[0]["discount_pct"] * 100)) if plan.official.selections else 15
             alternate_discount = 0 if sample_discount != 0 else 5
-            example_cols = st.columns(3)
-            example_cols[0].code("Summarize the proposal")
-            example_cols[1].code(f"Why is SKU {sample_upc} at {sample_discount}%?")
-            example_cols[2].code(f"What if we force {alternate_discount}% for SKU {sample_upc}?")
-            st.caption(
-                "Supported rule what-ifs: budget %, safety-stock %, min-margin % for one SKU, and competitor-tolerance % for one SKU. "
-                "The official proposal never changes when you ask these questions."
+            st.info(
+                "\n".join(
+                    [
+                        "Supported scope",
+                        f"- Summarize the proposal",
+                        f"- Why is SKU {sample_upc} at {sample_discount}%?",
+                        f"- Why not {alternate_discount}% for SKU {sample_upc}?",
+                        f"- What if we force {alternate_discount}% for SKU {sample_upc}?",
+                        "- What if budget becomes 8%?",
+                        "",
+                        "The assistant does not change the official proposal. Every what-if is a separate child solve.",
+                    ]
+                )
             )
 
             chat_key = f"chat_history_{selected_scenario}"
@@ -513,6 +627,10 @@ def main() -> None:
                     st.write(turn["question"])
                 with st.chat_message("assistant"):
                     st.write(turn["response_text"])
+                    intent_cols = st.columns(3)
+                    intent_cols[0].caption(f"Detected intent: `{turn['intent'].get('intent', 'UNKNOWN')}`")
+                    intent_cols[1].caption(f"Confidence: `{float(turn['intent'].get('confidence', 0.0)):.2f}`")
+                    intent_cols[2].caption(f"Scope: {turn['intent'].get('scope', 'Not available')}")
                     if turn["intent"]["intent"] in {"OVERRIDE_WHAT_IF", "RULE_WHAT_IF"} and "comparison" in turn["evidence"]:
                         st.caption(f"Official proposal unchanged. What-if run id: `{turn['evidence']['what_if_run_id']}`")
                         if turn["evidence"]["comparison"].get("comparable") is False:
@@ -525,17 +643,15 @@ def main() -> None:
                             if not violation_rows.empty:
                                 st.dataframe(violation_rows, use_container_width=True, hide_index=True)
                         else:
-                            changed = pd.DataFrame(turn["evidence"]["comparison"]["changed_skus"])
+                            changed = _format_changed_skus(pd.DataFrame(turn["evidence"]["comparison"]["changed_skus"]))
                             if not changed.empty:
                                 st.dataframe(changed, use_container_width=True, hide_index=True)
                             summary_delta = turn["evidence"]["comparison"].get("summary_delta")
                             if summary_delta:
-                                delta_frame = pd.DataFrame(
-                                    [{"metric": key, "delta": value} for key, value in summary_delta.items()]
-                                )
+                                delta_frame = _format_delta_table(summary_delta)
                                 st.dataframe(delta_frame, use_container_width=True, hide_index=True)
 
-                    with st.expander("Evidence payload", expanded=False):
+                    with st.expander("Debug evidence payload", expanded=False):
                         st.json(turn["evidence"])
 
             prompt = st.chat_input("Ask about the proposal or run a bounded what-if...")
