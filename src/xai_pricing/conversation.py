@@ -394,7 +394,7 @@ Response rules:
         return {"intent": "UNSUPPORTED", "upc": None, "discount_pct": None, "rule_name": None, "rule_value": None, "confidence": 0.2, "scope": INTENT_SCOPE_TEXT["UNSUPPORTED"]}
 
     def _format_currency(self, value: float | int) -> str:
-        return f"{float(value):,.2f}"
+        return f"${float(value):,.2f}"
 
     def _format_number(self, value: float | int) -> str:
         return f"{float(value):,.2f}"

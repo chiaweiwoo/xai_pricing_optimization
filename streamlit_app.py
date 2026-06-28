@@ -161,7 +161,7 @@ def _format_pct(value: float) -> str:
 
 
 def _format_currency(value: float) -> str:
-    return f"{value:,.2f}"
+    return f"${value:,.2f}"
 
 
 def _format_count(value: float | int) -> str:
