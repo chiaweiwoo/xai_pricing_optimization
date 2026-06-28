@@ -283,6 +283,20 @@ class PricingDecisionService:
     def compare_runs(self, base_run_id: str, candidate_run_id: str) -> dict[str, Any]:
         base = self.load_run_result(base_run_id)
         candidate = self.load_run_result(candidate_run_id)
+        comparison: dict[str, Any] = {
+            "base_run_id": base_run_id,
+            "candidate_run_id": candidate_run_id,
+            "base_status": base.status,
+            "candidate_status": candidate.status,
+            "comparable": candidate.status == "optimal",
+        }
+        if candidate.status != "optimal":
+            comparison["changed_sku_count"] = 0
+            comparison["summary_delta"] = None
+            comparison["changed_skus"] = []
+            comparison["infeasibility"] = self._summarize_infeasibility(candidate)
+            return comparison
+
         metrics = [
             "selected_products",
             "promoted_products",
@@ -338,13 +352,11 @@ class PricingDecisionService:
                 }
             )
 
-        return {
-            "base_run_id": base_run_id,
-            "candidate_run_id": candidate_run_id,
-            "changed_sku_count": int(len(changed_rows)),
-            "summary_delta": deltas,
-            "changed_skus": changed_rows,
-        }
+        comparison["changed_sku_count"] = int(len(changed_rows))
+        comparison["summary_delta"] = deltas
+        comparison["changed_skus"] = changed_rows
+        comparison["infeasibility"] = None
+        return comparison
 
     def _build_working_frame(
         self,
@@ -460,3 +472,13 @@ class PricingDecisionService:
         }
         digest = hashlib.sha256(json_dumps(payload).encode("utf-8")).hexdigest()[:10]
         return f"{source_run_id}__what_if__{digest}"
+
+    def _summarize_infeasibility(self, result: SolveResult) -> dict[str, Any]:
+        precheck = result.diagnostics.get("precheck", {})
+        return {
+            "status": result.status,
+            "invalid_skus": precheck.get("invalid_skus", []),
+            "lock_conflicts": precheck.get("lock_conflicts", []),
+            "hard_violation_counts": precheck.get("hard_violation_counts", {}),
+            "hard_violation_examples": precheck.get("hard_violation_examples", []),
+        }

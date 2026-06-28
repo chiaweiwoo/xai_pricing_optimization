@@ -274,6 +274,7 @@ If the request is outside the supported set, return UNSUPPORTED.
             "result_status": result.result.status,
             "result_summary": result.result.summary,
             "comparison": result.comparison,
+            "infeasibility": result.comparison.get("infeasibility"),
         }
 
     def _rule_what_if_evidence(self, *, plan: PlanBundle, intent: dict[str, Any]) -> dict[str, Any]:
@@ -397,6 +398,27 @@ If the evidence is a what-if result, explicitly state that the official proposal
                 f"{target['gross_profit']:.2f} versus {selected['gross_profit']:.2f} for the selected point."
             )
         if name in {"OVERRIDE_WHAT_IF", "RULE_WHAT_IF"} and evidence.get("comparison"):
+            if evidence["comparison"].get("comparable") is False:
+                infeasibility = evidence["comparison"].get("infeasibility") or {}
+                lock_conflicts = infeasibility.get("lock_conflicts", [])
+                if lock_conflicts:
+                    first_conflict = lock_conflicts[0]
+                    return (
+                        "This what-if re-solve leaves the official proposal unchanged. "
+                        f"The requested override is infeasible because SKU {first_conflict['upc']} at "
+                        f"{first_conflict['discount_pct']:.0%} conflicts with {first_conflict['reason']}."
+                    )
+                invalid_skus = infeasibility.get("invalid_skus", [])
+                if invalid_skus:
+                    return (
+                        "This what-if re-solve leaves the official proposal unchanged. "
+                        f"The request is infeasible because some SKUs have no valid candidate under the new rules, "
+                        f"including {invalid_skus[0]}."
+                    )
+                return (
+                    "This what-if re-solve leaves the official proposal unchanged. "
+                    "The requested scenario is infeasible under the current hard rules."
+                )
             delta = evidence["comparison"]["summary_delta"]
             return (
                 f"This what-if re-solve leaves the official proposal unchanged. The simulated plan changes "

@@ -82,6 +82,31 @@ def test_counterfactual_runs_are_cached_and_immutable(seeded_conn) -> None:
     assert stored_source["run_kind"] == "what_if"
 
 
+def test_counterfactual_infeasibility_returns_diagnostics_not_fake_deltas(seeded_conn) -> None:
+    conn, dataset_version_id = seeded_conn
+    build_demo_scenario(
+        conn,
+        dataset_version_id,
+        ScenarioSettings(
+            scenario_id="planner_infeasible_cf_test",
+            scenario_name="Planner Infeasible CF Test",
+            profile_id="balanced_campaign_v1",
+        ),
+    )
+
+    service = PricingDecisionService(conn)
+    bundle = service.build_plan_bundle("planner_infeasible_cf_test")
+    counterfactual = service.simulate_counterfactual(
+        bundle.official.run_id,
+        exact_discount_locks={"1001": 0.30},
+    )
+
+    assert counterfactual.result.status == "infeasible_precheck"
+    assert counterfactual.comparison["comparable"] is False
+    assert counterfactual.comparison["summary_delta"] is None
+    assert counterfactual.comparison["infeasibility"]["lock_conflicts"][0]["reason"] == "candidate_missing"
+
+
 def test_sku_dossier_exposes_selected_current_and_local_best(seeded_conn) -> None:
     conn, dataset_version_id = seeded_conn
     build_demo_scenario(

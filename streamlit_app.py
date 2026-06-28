@@ -293,10 +293,13 @@ def main() -> None:
             st.caption(
                 "Supported intents: plan summary, why this SKU, why not another discrete discount, force a discrete SKU discount, or change one safe rule in a separate what-if run."
             )
+            sample_upc = plan.official.selections[0]["upc"] if plan.official.selections else "SKU"
+            sample_discount = int(round(plan.official.selections[0]["discount_pct"] * 100)) if plan.official.selections else 15
+            alternate_discount = 0 if sample_discount != 0 else 5
             example_cols = st.columns(3)
             example_cols[0].code("Summarize the proposal")
-            example_cols[1].code("Why is SKU 1001 at 15%?")
-            example_cols[2].code("What if budget becomes 8%?")
+            example_cols[1].code(f"Why is SKU {sample_upc} at {sample_discount}%?")
+            example_cols[2].code(f"What if we force {alternate_discount}% for SKU {sample_upc}?")
 
             chat_key = f"chat_history_{selected_scenario}"
             if chat_key not in st.session_state:
@@ -309,9 +312,28 @@ def main() -> None:
                     st.write(turn["response_text"])
                     if turn["intent"]["intent"] in {"OVERRIDE_WHAT_IF", "RULE_WHAT_IF"} and "comparison" in turn["evidence"]:
                         st.caption(f"Official proposal unchanged. What-if run id: `{turn['evidence']['what_if_run_id']}`")
-                        changed = pd.DataFrame(turn["evidence"]["comparison"]["changed_skus"])
-                        if not changed.empty:
-                            st.dataframe(changed, use_container_width=True, hide_index=True)
+                        if turn["evidence"]["comparison"].get("comparable") is False:
+                            infeasibility = turn["evidence"].get("infeasibility") or {}
+                            st.warning("What-if scenario is infeasible under the current hard rules.")
+                            conflict_rows = pd.DataFrame(infeasibility.get("lock_conflicts", []))
+                            if not conflict_rows.empty:
+                                st.dataframe(conflict_rows, use_container_width=True, hide_index=True)
+                            violation_rows = pd.DataFrame(infeasibility.get("hard_violation_examples", []))
+                            if not violation_rows.empty:
+                                st.dataframe(violation_rows, use_container_width=True, hide_index=True)
+                        else:
+                            changed = pd.DataFrame(turn["evidence"]["comparison"]["changed_skus"])
+                            if not changed.empty:
+                                st.dataframe(changed, use_container_width=True, hide_index=True)
+                            summary_delta = turn["evidence"]["comparison"].get("summary_delta")
+                            if summary_delta:
+                                delta_frame = pd.DataFrame(
+                                    [{"metric": key, "delta": value} for key, value in summary_delta.items()]
+                                )
+                                st.dataframe(delta_frame, use_container_width=True, hide_index=True)
+
+                    with st.expander("Evidence payload", expanded=False):
+                        st.json(turn["evidence"])
 
             prompt = st.chat_input("Ask about the proposal or run a bounded what-if...")
             if prompt:
