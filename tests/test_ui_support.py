@@ -1,4 +1,4 @@
-from xai_pricing.ui_support import build_selection_snapshot, select_review_cases
+from xai_pricing.ui_support import build_roi_snapshot, build_selection_snapshot, select_review_cases
 
 
 def test_select_review_cases_is_deterministic_and_unique() -> None:
@@ -57,3 +57,24 @@ def test_select_review_cases_is_deterministic_and_unique() -> None:
     assert cases[1]["upc"] == "B"
     assert cases[2]["upc"] == "C"
     assert len({case["upc"] for case in cases}) == 3
+
+
+def test_build_roi_snapshot_uses_incremental_gp_over_markdown_spend() -> None:
+    snapshot = build_roi_snapshot(
+        official_summary={"total_gross_profit": 1250.0, "total_markdown_investment": 200.0},
+        current_summary={"total_gross_profit": 1150.0},
+    )
+
+    assert snapshot["incremental_gross_profit"] == 100.0
+    assert snapshot["markdown_spend"] == 200.0
+    assert snapshot["return_on_markdown"] == 0.5
+
+
+def test_build_roi_snapshot_returns_none_when_markdown_spend_is_zero() -> None:
+    snapshot = build_roi_snapshot(
+        official_summary={"total_gross_profit": 900.0, "total_markdown_investment": 0.0},
+        current_summary={"total_gross_profit": 850.0},
+    )
+
+    assert snapshot["incremental_gross_profit"] == 50.0
+    assert snapshot["return_on_markdown"] is None

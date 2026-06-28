@@ -7,6 +7,7 @@ import re
 from typing import Any
 from urllib import error, request
 
+from . import config as _config  # Ensures .env is loaded before reading environment variables.
 from .db import json_dumps
 from .planner import CounterfactualResult, PlanBundle, PricingDecisionService
 
@@ -28,7 +29,7 @@ INTENT_SCOPE_TEXT = {
     "WHY_SELECTED": "Explain why one product received its selected discount.",
     "WHY_NOT": "Explain why a different discrete discount was not selected for one product.",
     "OVERRIDE_WHAT_IF": "Force one product to a discrete discount and re-solve a separate child scenario.",
-    "RULE_WHAT_IF": "Change one safe rule such as budget, safety stock, minimum margin, or competitor tolerance.",
+    "RULE_WHAT_IF": "Change one safe rule such as budget, minimum margin, or competitor tolerance.",
     "HELP": "Show supported question types and example prompts.",
     "CLARIFY": "Ask for one missing field needed to answer a supported question.",
     "UNSUPPORTED": "Question is outside the supported assistant scope.",
@@ -152,7 +153,6 @@ Supported override scope:
 
 Supported rule what-if scope:
 - budget_pct
-- safety_stock_pct
 - min_margin_pct
 - competitor_tolerance_pct
 
@@ -248,6 +248,12 @@ Rules:
                 "sku_dossier": dossier,
                 "current_counterfactual": current_lock,
                 "local_best_counterfactual": local_best_lock,
+                "selection_analysis": self._build_selection_analysis(
+                    plan=plan,
+                    dossier=dossier,
+                    current_counterfactual=current_lock,
+                    local_best_counterfactual=local_best_lock,
+                ),
                 "benchmark_comparison": self._plan_summary_evidence(plan)["benchmark_comparison"],
             }
         if name == "WHY_NOT":
@@ -299,7 +305,7 @@ Rules:
 
     def _plan_summary_evidence(self, plan: PlanBundle) -> dict[str, Any]:
         official = plan.official.summary
-        profit_first = plan.profit_first.summary
+        position_first = plan.position_first.summary
         ceiling = plan.theoretical_ceiling.summary
         current = plan.current_price.summary
         return {
@@ -307,22 +313,22 @@ Rules:
             "plan_brief": plan.brief,
             "official": official,
             "official_run_id": plan.official.run_id,
-            "profit_first": profit_first,
+            "position_first": position_first,
             "current_price": current,
             "theoretical_ceiling": ceiling,
             "benchmark_comparison": {
                 "vs_current_gp": round(float(official["total_gross_profit"]) - float(current["total_gross_profit"]), 2),
                 "vs_current_revenue": round(float(official["total_revenue"]) - float(current["total_revenue"]), 2),
-                "vs_profit_first_gp": round(
-                    float(official["total_gross_profit"]) - float(profit_first["total_gross_profit"]),
+                "vs_position_first_gp": round(
+                    float(official["total_gross_profit"]) - float(position_first["total_gross_profit"]),
                     2,
                 ),
                 "vs_ceiling_gp": round(
                     float(ceiling["total_gross_profit"]) - float(official["total_gross_profit"]),
                     2,
                 ),
-                "official_gap_vs_profit_first": round(
-                    float(official["weighted_competitor_gap"]) - float(profit_first["weighted_competitor_gap"]),
+                "official_gap_vs_position_first": round(
+                    float(official["weighted_competitor_gap"]) - float(position_first["weighted_competitor_gap"]),
                     4,
                 ),
             },
@@ -344,27 +350,32 @@ Rules:
     def _rule_what_if_evidence(self, *, plan: PlanBundle, intent: dict[str, Any]) -> dict[str, Any]:
         rule_name = intent.get("rule_name")
         rule_value = intent.get("rule_value")
-        if rule_name == "budget_pct" and rule_value is not None:
-            counterfactual = self.planner.simulate_counterfactual(plan.official.run_id, budget_pct=rule_value)
-            return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
-        if rule_name == "safety_stock_pct" and rule_value is not None:
-            counterfactual = self.planner.simulate_counterfactual(plan.official.run_id, safety_stock_pct=rule_value)
-            return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
-        if rule_name == "min_margin_pct" and rule_value is not None and intent.get("upc"):
-            counterfactual = self.planner.simulate_counterfactual(
-                plan.official.run_id,
-                min_margin_overrides={intent["upc"]: rule_value},
-            )
-            return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
-        if rule_name == "competitor_tolerance_pct" and rule_value is not None and intent.get("upc"):
-            counterfactual = self.planner.simulate_counterfactual(
-                plan.official.run_id,
-                competitor_tolerance_overrides={intent["upc"]: rule_value},
-            )
-            return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
+        try:
+            if rule_name == "budget_pct" and rule_value is not None:
+                counterfactual = self.planner.simulate_counterfactual(plan.official.run_id, budget_pct=rule_value)
+                return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
+            if rule_name == "min_margin_pct" and rule_value is not None and intent.get("upc"):
+                counterfactual = self.planner.simulate_counterfactual(
+                    plan.official.run_id,
+                    min_margin_overrides={intent["upc"]: rule_value},
+                )
+                return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
+            if rule_name == "competitor_tolerance_pct" and rule_value is not None and intent.get("upc"):
+                counterfactual = self.planner.simulate_counterfactual(
+                    plan.official.run_id,
+                    competitor_tolerance_overrides={intent["upc"]: rule_value},
+                )
+                return {**self._counterfactual_evidence(counterfactual, plan=plan), "rule_name": rule_name, "rule_value": rule_value}
+        except ValueError as exc:
+            return {
+                "intent": "CLARIFY",
+                "message": str(exc),
+                "missing_fields": ["rule_value"],
+                "starter_questions": self._starter_questions(plan),
+            }
         return {
             "intent": "CLARIFY",
-            "message": "Supported rule what-if inputs are budget, safety stock, minimum margin by product, and competitor tolerance by product.",
+            "message": "Supported rule what-if inputs are budget, minimum margin by product, and competitor tolerance by product.",
             "missing_fields": ["rule_value"],
             "starter_questions": self._starter_questions(plan),
         }
@@ -428,10 +439,14 @@ Rules:
             return fallback
         if not headline or not summary:
             return fallback
+        if not self._contains_only_allowed_numbers(summary, fallback["summary"]):
+            return fallback
+        if not self._contains_only_allowed_numbers(caveat, fallback["caveat"]):
+            return fallback
         return {
             "headline": headline,
             "summary": summary,
-            "key_points": key_points[:4] or fallback["key_points"],
+            "key_points": fallback["key_points"],
             "caveat": caveat or fallback["caveat"],
             "suggested_questions": suggested[:3] or fallback["suggested_questions"],
         }
@@ -447,8 +462,6 @@ Rules:
             return self._intent_payload("HELP")
         if "budget" in lowered and pct_value is not None:
             return self._intent_payload("RULE_WHAT_IF", rule_name="budget_pct", rule_value=pct_value)
-        if "safety stock" in lowered and pct_value is not None:
-            return self._intent_payload("RULE_WHAT_IF", rule_name="safety_stock_pct", rule_value=pct_value)
         if "margin" in lowered and resolved_upc and pct_value is not None:
             return self._intent_payload(
                 "RULE_WHAT_IF",
@@ -470,7 +483,7 @@ Rules:
                 return self._intent_payload("CLARIFY", upc=resolved_upc, missing_fields=["discount_pct"])
             return self._intent_payload("WHY_NOT", upc=resolved_upc, discount_pct=pct_value)
         if "what if" in lowered or "force" in lowered:
-            if "budget" in lowered or "safety stock" in lowered:
+            if "budget" in lowered:
                 if pct_value is None:
                     return self._intent_payload("CLARIFY", missing_fields=["rule_value"])
             if not resolved_upc:
@@ -599,19 +612,21 @@ Rules:
         if name == "PLAN_SUMMARY":
             brief = evidence["plan_brief"]
             official = evidence["official"]
+            tolerance_pct = float(brief.get("competitor_tradeoff_tolerance_pct", 0.0) or 0.0)
             return {
                 "headline": "Recommended campaign summary",
                 "summary": (
                     f"{brief['headline']} The plan promotes {self._format_count(official['promoted_products'])} of "
                     f"{self._format_count(official['selected_products'])} products, uses {self._format_pct(official['budget_utilization_pct'])} "
-                    f"of the markdown budget, and lands at competitor mismatch score {self._format_gap(official['weighted_competitor_gap'])}."
+                    f"of the markdown budget, and keeps expected demand within on-hand inventory for every SKU."
                 ),
                 "key_points": [
                     f"Gross profit is {self._format_currency(official['total_gross_profit'])}, which is {self._format_currency(brief['profit_vs_current'])} versus current prices.",
                     f"Revenue changes by {self._format_currency(brief['revenue_vs_current'])} versus current prices.",
-                    f"The profit-first benchmark earns {self._format_currency(abs(brief['profit_vs_profit_first']))} more gross profit but accepts a worse competitor-position score.",
+                    f"The competitor-aware solve can trade up to {self._format_pct(tolerance_pct)} of gross profit to reduce weighted competitor gap before using discount depth as the final tie-breaker.",
+                    f"The price-position-first benchmark changes gross profit by {self._format_currency(brief['profit_vs_position_first'])} and competitor gap by {self._format_gap(brief['gap_improvement_vs_position_first'])} versus the official plan.",
                 ],
-                "caveat": "This recommended campaign is a competitor-first plan, not the pure profit-maximizing feasible plan.",
+                "caveat": "The official recommendation is the fixed proposal. What-if questions run separate comparison solves and never overwrite it.",
                 "suggested_questions": self._starter_questions(plan)[:3],
             }
         if name == "WHY_SELECTED":
@@ -620,23 +635,26 @@ Rules:
             vs_current = dossier["selected_vs_current"]
             current_cf = evidence.get("current_counterfactual")
             local_best_cf = evidence.get("local_best_counterfactual")
+            analysis = evidence.get("selection_analysis", {})
+            primary_reason = analysis.get("primary_reason_label", "Portfolio fit")
+            reason_detail = analysis.get("primary_reason_detail", "This point fits the official solve order best.")
             key_points = [
                 f"Selected discount is {self._format_pct(selected['discount_pct'])} at {self._format_currency(selected['candidate_price'])}, with expected gross profit {self._format_currency(selected['gross_profit'])}.",
                 f"Versus the current price point, this SKU changes gross profit by {self._format_currency(vs_current['gross_profit'])} and revenue by {self._format_currency(vs_current['revenue'])}.",
+                f"Primary reason: {primary_reason}. {reason_detail}",
             ]
             if current_cf and current_cf["comparison"]["comparable"]:
                 key_points.append(
-                    f"If we force the current price for this product and re-solve the portfolio, total gross profit changes by {self._format_currency(current_cf['comparison']['summary_delta']['total_gross_profit'])} versus the official plan."
+                    f"If we force the current price for this product and re-solve the portfolio, total gross profit becomes {self._format_currency(current_cf['result_summary']['total_gross_profit'])}, a change of {self._format_currency(current_cf['comparison']['summary_delta']['total_gross_profit'])} versus the official plan."
                 )
             elif local_best_cf and local_best_cf["comparison"]["comparable"]:
                 key_points.append(
-                    f"The product-local profit winner is feasible by itself, but a portfolio re-solve changes total competitor mismatch score by {self._format_gap(local_best_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
+                    f"The SKU-local profit winner is feasible by itself, but a portfolio re-solve moves total gross profit by {self._format_currency(local_best_cf['comparison']['summary_delta']['total_gross_profit'])} and weighted competitor gap by {self._format_gap(local_best_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
                 )
             return {
                 "headline": f"Why this discount for {dossier['product']['product_label']}",
                 "summary": (
-                    "The recommended campaign kept this product at the selected discount because the portfolio optimizes competitor position before gross profit. "
-                    "That means a product-level profit maximum can still lose once the full portfolio trade-off is considered."
+                    f"The recommended campaign kept this product at the selected discount because it best fits the official portfolio solve order. In plain language: {reason_detail.lower()}"
                 ),
                 "key_points": key_points,
                 "caveat": "This explains the fixed recommendation; it does not mean another discount is impossible.",
@@ -665,7 +683,7 @@ Rules:
                     "summary": "That alternative was not selected because it fails at least one hard business rule before the portfolio solve even starts.",
                     "key_points": [
                         f"Blocking reason: {target['reason']}.",
-                        f"At that point, expected gross margin is {self._format_pct(target['gross_margin_pct'])} and ending inventory is {self._format_count(target['ending_inventory_units'])} units.",
+                        f"At that point, expected gross margin is {self._format_pct(target['gross_margin_pct'])} and expected ending stock is {self._format_count(target['ending_inventory_units'])} units.",
                     ],
                     "caveat": "A hard-rule failure means the solver never treats this option as a valid candidate.",
                     "suggested_questions": [
@@ -680,7 +698,7 @@ Rules:
             ]
             if alt_cf and alt_cf["comparison"]["comparable"]:
                 key_points.append(
-                    f"If we force {self._format_pct(target['discount_pct'])} and re-solve the portfolio, total gross profit changes by {self._format_currency(alt_cf['comparison']['summary_delta']['total_gross_profit'])} and competitor mismatch score changes by {self._format_gap(alt_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
+                    f"If we force {self._format_pct(target['discount_pct'])} and re-solve the portfolio, total gross profit becomes {self._format_currency(alt_cf['result_summary']['total_gross_profit'])}, changing by {self._format_currency(alt_cf['comparison']['summary_delta']['total_gross_profit'])}; weighted competitor gap changes by {self._format_gap(alt_cf['comparison']['summary_delta']['weighted_competitor_gap'])}."
                 )
             return {
                 "headline": f"Why not {self._format_pct(target['discount_pct'])} for {dossier['product']['product_label']}",
@@ -697,22 +715,30 @@ Rules:
             if comparison.get("comparable") is False:
                 infeasibility = evidence.get("infeasibility") or {}
                 conflict = (infeasibility.get("lock_conflicts") or [{}])[0]
+                global_conflict = (infeasibility.get("global_conflicts") or [{}])[0]
                 return {
                     "headline": "What-if result: infeasible",
                     "summary": "Official proposal unchanged. This what-if scenario cannot be solved under the current hard rules.",
                     "key_points": [
                         f"First blocker: {conflict.get('upc', 'n/a')} at {self._format_pct(conflict.get('discount_pct', 0.0))}." if conflict else "The requested lock conflicts with the current candidate set.",
                         f"Invalid SKU count under the new rules: {self._format_count(len(infeasibility.get('invalid_skus', [])))}.",
+                        (
+                            f"Portfolio-level blocker: minimum feasible markdown rate would be {self._format_pct(global_conflict.get('minimum_budget_utilization_pct', 0.0) or 0.0)} against a {self._format_pct(global_conflict.get('budget_limit_pct', 0.0) or 0.0)} limit."
+                            if global_conflict and global_conflict.get("minimum_budget_utilization_pct") is not None
+                            else "No portfolio-level blocker was detected before the solve."
+                        ),
                     ],
                     "caveat": "Try another supported discount or relax one safe rule in a separate simulation.",
                     "suggested_questions": self._starter_questions(plan)[:3],
                 }
             delta = comparison["summary_delta"]
+            result_summary = evidence["result_summary"]
             return {
                 "headline": "What-if result",
                 "summary": "Official proposal unchanged. This answer comes from a separate child solve used only for comparison.",
                 "key_points": [
-                    f"Gross profit changes by {self._format_currency(delta['total_gross_profit'])} and revenue changes by {self._format_currency(delta['total_revenue'])}.",
+                    f"Expected gross profit becomes {self._format_currency(result_summary['total_gross_profit'])}, a change of {self._format_currency(delta['total_gross_profit'])}.",
+                    f"Revenue changes by {self._format_currency(delta['total_revenue'])} and markdown spend changes by {self._format_currency(delta['total_markdown_investment'])}.",
                     f"Competitor mismatch score changes by {self._format_gap(delta['weighted_competitor_gap'])}.",
                     f"{self._format_count(comparison['changed_sku_count'])} products change versus the official plan.",
                 ],
@@ -747,6 +773,79 @@ Rules:
             "caveat": "This demo supports only a small set of explanation and simulation scenarios.",
             "suggested_questions": self._starter_questions(plan)[:3],
         }
+
+    def _build_selection_analysis(
+        self,
+        *,
+        plan: PlanBundle,
+        dossier: dict[str, Any],
+        current_counterfactual: dict[str, Any] | None,
+        local_best_counterfactual: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        selected = dossier["selected"]
+        local_best = dossier["local_best_feasible"]
+        invalid_alternative_count = sum(1 for row in dossier["alternatives"] if not row["effective_hard_valid"])
+        if int(selected["candidate_rank"]) == int(local_best["candidate_rank"]):
+            return {
+                "primary_reason_code": "sku_local_best",
+                "primary_reason_label": "Best feasible point for this SKU",
+                "primary_reason_detail": "This discount is already the strongest gross-profit point that remains feasible for this SKU after margin and on-hand inventory screening.",
+                "invalid_alternative_count": invalid_alternative_count,
+            }
+
+        if local_best_counterfactual and local_best_counterfactual["comparison"]["comparable"]:
+            delta = local_best_counterfactual["comparison"]["summary_delta"]
+            if float(delta["total_gross_profit"]) < -0.01:
+                return {
+                    "primary_reason_code": "portfolio_tradeoff",
+                    "primary_reason_label": "Portfolio trade-off",
+                    "primary_reason_detail": (
+                        f"Forcing the SKU-local gross-profit winner would reduce portfolio gross profit by {self._format_currency(abs(delta['total_gross_profit']))} "
+                        f"and rebalance {self._format_count(local_best_counterfactual['comparison']['changed_sku_count'])} SKUs."
+                    ),
+                    "invalid_alternative_count": invalid_alternative_count,
+                }
+            if float(delta["weighted_competitor_gap"]) > 0.0:
+                return {
+                    "primary_reason_code": "competitor_position",
+                    "primary_reason_label": "Competitor position protection",
+                    "primary_reason_detail": (
+                        f"The selected point keeps the weighted competitor gap lower by {self._format_gap(delta['weighted_competitor_gap'])} while staying within the official profit tolerance."
+                    ),
+                    "invalid_alternative_count": invalid_alternative_count,
+                }
+
+        if current_counterfactual and current_counterfactual["comparison"]["comparable"]:
+            delta = current_counterfactual["comparison"]["summary_delta"]
+            if float(delta["total_gross_profit"]) < -0.01:
+                return {
+                    "primary_reason_code": "better_than_current",
+                    "primary_reason_label": "Better than staying at current price",
+                    "primary_reason_detail": (
+                        f"Keeping the current price would lower portfolio gross profit by {self._format_currency(abs(delta['total_gross_profit']))}."
+                    ),
+                    "invalid_alternative_count": invalid_alternative_count,
+                }
+
+        return {
+            "primary_reason_code": "portfolio_fit",
+            "primary_reason_label": "Best portfolio fit",
+            "primary_reason_detail": "This point fits the campaign-level profit, budget, and competitor-position trade-off best among the allowed discount buckets.",
+            "invalid_alternative_count": invalid_alternative_count,
+        }
+
+    def _contains_only_allowed_numbers(self, candidate_text: str, fallback_text: str) -> bool:
+        allowed = self._normalized_number_tokens(fallback_text)
+        candidate = self._normalized_number_tokens(candidate_text)
+        return candidate.issubset(allowed)
+
+    def _normalized_number_tokens(self, text: str) -> set[str]:
+        tokens = re.findall(r"[$]?-?\d[\d,]*(?:\.\d+)?%?|n/a", text.lower())
+        normalized = set()
+        for token in tokens:
+            cleaned = token.replace("$", "").replace(",", "")
+            normalized.add(cleaned)
+        return normalized
 
     def _render_presentation(self, presentation: dict[str, Any]) -> str:
         lines = [f"**{presentation['headline']}**", "", presentation["summary"]]

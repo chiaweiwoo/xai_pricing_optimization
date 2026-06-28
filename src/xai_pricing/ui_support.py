@@ -16,11 +16,9 @@ def build_selection_snapshot(
         current = current_map.get(upc, {})
         product = catalog_map.get(upc, {})
         ending_inventory = float(row.get("ending_inventory_units", 0.0) or 0.0)
-        safety_stock = float(product.get("safety_stock_units", 0.0) or 0.0)
-        inbound_units = float(product.get("inbound_units", 0.0) or 0.0)
         on_hand_units = float(product.get("on_hand_units", 0.0) or 0.0)
-        inventory_buffer = ending_inventory - safety_stock
-        inventory_cover = on_hand_units + inbound_units - safety_stock
+        expected_units = float(row.get("expected_units", 0.0) or 0.0)
+        upside_lost_units = float(row.get("optimistic_lost_units", 0.0) or 0.0)
         snapshot.append(
             {
                 "upc": upc,
@@ -34,10 +32,11 @@ def build_selection_snapshot(
                 "current_gross_profit": float(current.get("gross_profit", 0.0) or 0.0),
                 "competitor_gap": float(row.get("competitor_gap", 0.0) or 0.0),
                 "current_competitor_gap": float(current.get("competitor_gap", 0.0) or 0.0),
+                "expected_units": expected_units,
+                "on_hand_units": on_hand_units,
                 "ending_inventory_units": ending_inventory,
-                "safety_stock_units": safety_stock,
-                "inventory_buffer_units": inventory_buffer,
-                "inventory_cover_units": inventory_cover,
+                "inventory_buffer_units": ending_inventory,
+                "upside_lost_units": upside_lost_units,
                 "competitor_gap_improvement": float(current.get("competitor_gap", 0.0) or 0.0)
                 - float(row.get("competitor_gap", 0.0) or 0.0),
                 "gross_profit_tradeoff": float(row.get("gross_profit", 0.0) or 0.0)
@@ -90,7 +89,7 @@ def select_review_cases(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
         (
             "inventory_protection",
             "Inventory-protected product",
-            "This product ends closest to its safety-stock buffer, so the recommendation stays careful here.",
+            "This product ends with the least stock left, so the recommendation stays careful here.",
             inventory_case,
         ),
         (
@@ -134,3 +133,21 @@ def select_review_cases(snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return cases
+
+
+def build_roi_snapshot(
+    official_summary: dict[str, Any],
+    current_summary: dict[str, Any],
+) -> dict[str, float | None]:
+    official_gp = float(official_summary.get("total_gross_profit", 0.0) or 0.0)
+    current_gp = float(current_summary.get("total_gross_profit", 0.0) or 0.0)
+    markdown_spend = float(official_summary.get("total_markdown_investment", 0.0) or 0.0)
+    incremental_gp = official_gp - current_gp
+    roi = None if markdown_spend <= 0 else incremental_gp / markdown_spend
+    return {
+        "official_gross_profit": official_gp,
+        "current_gross_profit": current_gp,
+        "incremental_gross_profit": incremental_gp,
+        "markdown_spend": markdown_spend,
+        "return_on_markdown": roi,
+    }

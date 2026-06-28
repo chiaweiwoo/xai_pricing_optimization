@@ -20,7 +20,7 @@ Those do not exist in the public workbook, so we generate them deterministically
 - Archetype: each SKU is mapped into a deterministic commercial story such as `competitor_pressure`, `low_inventory`, `overstock`, `margin_constrained`, `promotion_opportunity`, or `neutral`.
 - Elasticity: archetype and category dependent. Cereal and promo-oriented items are more price sensitive; some pizza and margin-driver items are intentionally less elastic.
 - Unit cost: derived as a share of list price to create meaningful margin trade-offs while preserving at least one safe option per SKU.
-- Inventory: weeks of cover are based on recent demand scale, then scaled by profile. The `inventory_stress_v1` profile deliberately reduces cover and inbound flow.
+- Inventory: weeks of cover are based on recent demand scale and converted into on-hand inventory plus smaller inbound context. Only current on-hand stock is treated as available to the optimizer.
 - Competitor price: generated from list price with deeper pressure for selected overstock and promotion-opportunity items so the solver must make real trade-offs.
 - Candidate outcomes: produced by a constant-elasticity model over the discrete menu `{0%, 5%, 10%, 15%, 20%, 25%}` and annotated with markdown spend, ending inventory, lost demand, competitor gap, and hard-rule validity.
 
@@ -29,5 +29,5 @@ Those do not exist in the public workbook, so we generate them deterministically
 - Every generated record is labeled `origin = 'synthetic'`.
 - The synthetic generator is seed-stable.
 - The demand model is explicitly a placeholder object for the later solver, not a fitted causal model.
-- The generator repairs a SKU if the first pass leaves it with no hard-valid candidate. The repair reduces cost pressure and/or adds enough inventory so the baseline option remains feasible.
-- Two official profiles are maintained: `balanced_campaign_v1` and `inventory_stress_v1`.
+- The generator repairs a SKU if the first pass leaves it with no hard-valid candidate. The repair reduces cost pressure and/or adds enough on-hand inventory so the baseline option remains feasible.
+- There is one official campaign: `promotion_campaign_v1`.

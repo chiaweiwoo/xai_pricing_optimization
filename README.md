@@ -11,7 +11,7 @@ The repository now has a working pricing-optimization foundation:
 - deterministic synthetic pricing scenarios
 - persisted OR solver runs and phase diagnostics
 - deterministic optimizer with budget, margin, inventory, and competitor logic
-- benchmark plan bundle: official, profit-first feasible, current-price baseline, theoretical ceiling
+- benchmark plan bundle: official, price-position-first, current-price baseline, theoretical ceiling
 - immutable what-if child runs and per-SKU evidence dossiers
 - bounded DeepSeek-assisted conversation layer for explanations and counterfactuals
 - Streamlit decision workbench
@@ -27,8 +27,7 @@ uv run python download_data.py
 uv run python ingest.py
 uv run python validate_data.py
 uv run python generate_demo_context.py
-uv run python solve_pricing.py balanced_campaign_v1
-uv run python solve_pricing.py inventory_stress_v1
+uv run python solve_pricing.py promotion_campaign_v1
 uv run python profile_data.py
 uv run pytest
 uv run python -m streamlit run streamlit_app.py
@@ -41,40 +40,35 @@ Outputs:
 - Profiling artifacts: `reports/generated/`
 - Optimizer audit tables: `optimizer_runs`, `optimizer_run_phases`, `optimizer_run_items`
 
-The two built-in synthetic scenarios are:
+The built-in synthetic campaign is:
 
-- `balanced_campaign_v1`: feasible portfolio with mixed 0%, 5%, 10%, 15%, and 20% discounts
-- `inventory_stress_v1`: same product set with tighter inventory, more protected SKUs, and a sharper budget trade-off
+- `promotion_campaign_v1`: one promotion campaign covering all 55 SKUs with discrete discounts, synthetic inventory and competitor context, and a 10% portfolio markdown budget
 
 ## What the app now shows
 
 The Streamlit app now reads as a single-page pricing briefing for an audience that is new to this project:
 
-- hero verdict: should this recommended campaign be approved?
-- three headline metrics: promoted products, competitor mismatch improvement, and gross-profit trade-off
-- discount-mix overview: how the campaign uses the discrete discount ladder
-- three review products: one competitor-driven case, one inventory-protected case, and one large profit trade-off
-- one-product spotlight: current point, recommended point, local best profit point, and the full discount ladder on demand
-- small chat section: explain the recommendation or run one bounded what-if without changing it
-- technical evidence: benchmarks, solver phases, full recommendation table, glossary, provenance, and latest assistant evidence
+- what this page is deciding and which fields are observed versus synthetic
+- four headline metrics: expected gross profit, budget used, promoted SKUs, and upside stockout-risk SKUs
+- one official recommendation table for all SKUs in the campaign
+- benchmark views: official, current-price baseline, price-position-first, and theoretical ceiling
+- one-product explainer with the full allowed discount ladder
+- one free-form chat box that classifies supported questions automatically and runs immutable what-if solves
 
-The current recommended campaign should be read as a `price-position strategy`, not a pure profit-maximizing plan. In the inventory stress scenario, the recommended campaign:
+The current recommended campaign should be read as a profit-first but inventory-aware portfolio plan:
 
-- promotes 36 of 55 products
-- uses the full 10% markdown budget
-- improves competitor mismatch score from `8.7564` to `0.6653`
-- increases revenue by about `$16,466`
-- sacrifices about `$4,742` gross profit versus keeping current prices
+- the solver chooses one allowed discount per SKU
+- expected demand must stay within current on-hand inventory
+- competitor prices matter, but only after profit ties are considered
+- deeper discounts can still be rejected because of margin, budget, or expected stockout risk
 
 The app keeps five core reference concepts visible:
 
-- `Recommended campaign`: competitor-first, then gross profit, then shallower discount depth
-- `Profit-first feasible`: respects the same hard rules and 10% markdown budget, but maximizes gross profit first
+- `Recommended campaign`: maximize expected gross profit first, then tighten competitor price position, then prefer shallower discounts
+- `Price-position-first`: respects the same hard rules and 10% markdown budget, but prioritizes competitor alignment before profit
 - `Current-price baseline`: what happens if we keep the current price points
-- `Theoretical profit ceiling`: per-SKU best feasible profit point, ignoring portfolio budget and competitor priority
+- `Theoretical profit ceiling`: per-SKU best feasible profit point, ignoring the shared portfolio budget
 - `What-if simulation`: a separate child run that never mutates the recommended campaign
-
-In the current `balanced_campaign_v1` demo, the recommended campaign trades away some gross profit to protect competitor position. On the seeded scenario today, the recommended run lands at `52,998.21` gross profit with competitor mismatch score `0.6092`, while the profit-first feasible benchmark reaches `57,955.53` gross profit but accepts a much larger competitor mismatch score of `8.8058`.
 
 ## Core business questions
 
@@ -112,7 +106,7 @@ The current assistant is intentionally narrow. It supports only:
 - why a SKU got its selected discount
 - why not another discrete discount for a SKU
 - what-if force a discrete SKU discount
-- what-if change `budget_pct`, `safety_stock_pct`, `min_margin_pct` for one SKU, or `competitor_tolerance_pct` for one SKU
+- what-if change `budget_pct`, `min_margin_pct` for one SKU, or `competitor_tolerance_pct` for one SKU
 
 Every supported what-if runs on a separate child solve keyed off the recommended run ID.
 

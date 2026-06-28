@@ -8,31 +8,22 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ingest import DATASET_VERSION_ID
 from xai_pricing.db import get_conn
-from xai_pricing.synthetic import PROFILE_CONFIG, ScenarioSettings, build_demo_scenario
+from xai_pricing.synthetic import ScenarioSettings, build_demo_scenario
 
 
 def main() -> None:
     conn = get_conn()
     try:
-        stats = []
-        for profile_id, profile in PROFILE_CONFIG.items():
-            scenario_settings = ScenarioSettings(
-                scenario_id=profile_id,
-                scenario_name=profile["scenario_name"],
-                profile_id=profile_id,
-            )
-            stats.append(build_demo_scenario(conn, DATASET_VERSION_ID, scenario_settings))
+        stats = build_demo_scenario(conn, DATASET_VERSION_ID, ScenarioSettings())
     finally:
         conn.close()
 
-    for item in stats:
-        print(f"Scenario:                  {item['profile_id']}")
-        print(f"Products in scenario:      {item['products']}")
-        print(f"Candidate outcomes loaded: {item['candidate_outcomes']}")
-        print(f"Hard-valid candidates:     {item['hard_valid_candidates']}")
-        print(f"Promotable products:       {item['promotable_products']}")
-        print(f"Planning week end:         {item['planning_week_end']}")
-        print()
+    print(f"Scenario:                  {stats['scenario_id']}")
+    print(f"Products in scenario:      {stats['products']}")
+    print(f"Candidate outcomes loaded: {stats['candidate_outcomes']}")
+    print(f"Hard-valid candidates:     {stats['hard_valid_candidates']}")
+    print(f"Promotable products:       {stats['promotable_products']}")
+    print(f"Planning week end:         {stats['planning_week_end']}")
 
 
 if __name__ == "__main__":

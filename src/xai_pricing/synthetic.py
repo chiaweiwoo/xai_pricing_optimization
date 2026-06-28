@@ -19,27 +19,13 @@ DEFAULT_BUDGET_PCT = 0.10
 DEFAULT_SAFETY_STOCK_PCT = 0.25
 COMPETITOR_TOLERANCE_PCT = 0.05
 
-PROFILE_CONFIG = {
-    "balanced_campaign_v1": {
-        "inventory_scale": 1.0,
-        "inbound_scale": 1.0,
-        "scenario_name": "Balanced Promotion Campaign v1",
-    },
-    "inventory_stress_v1": {
-        "inventory_scale": 0.62,
-        "inbound_scale": 0.70,
-        "scenario_name": "Inventory Stress Campaign v1",
-    },
-}
-
-
 @dataclass(frozen=True)
 class ScenarioSettings:
     scenario_id: str = DEFAULT_SCENARIO_ID
     scenario_name: str = DEFAULT_SCENARIO_NAME
     seed: int = DEFAULT_SYNTHETIC_SEED
     competitor_name: str = "MarketSquare"
-    profile_id: str = "balanced_campaign_v1"
+    profile_id: str = DEFAULT_SCENARIO_ID
     budget_pct: float = DEFAULT_BUDGET_PCT
     safety_stock_pct: float = DEFAULT_SAFETY_STOCK_PCT
 
@@ -96,18 +82,14 @@ def _archetype_recipe(
     *,
     archetype: str,
     role: str,
-    profile_id: str,
     rng: random.Random,
 ) -> dict[str, float]:
-    inventory_scale = PROFILE_CONFIG[profile_id]["inventory_scale"]
-    inbound_scale = PROFILE_CONFIG[profile_id]["inbound_scale"]
-
     if archetype == "competitor_pressure":
         return {
-            "elasticity": rng.uniform(-2.6, -1.9),
-            "cost_ratio": rng.uniform(0.62, 0.72),
-            "weeks_of_cover": rng.uniform(2.7, 4.2) * inventory_scale,
-            "inbound_weeks": rng.uniform(0.7, 1.2) * inbound_scale,
+            "elasticity": rng.uniform(-3.4, -2.6),
+            "cost_ratio": rng.uniform(0.58, 0.68),
+            "weeks_of_cover": rng.uniform(2.2, 3.4),
+            "inbound_weeks": rng.uniform(0.4, 0.8),
             "competitor_multiplier": rng.uniform(0.82, 0.90),
             "min_margin_pct": 0.20 if role in {"kvi", "traffic_driver"} else 0.24,
             "competitor_tolerance_pct": 0.05,
@@ -115,10 +97,10 @@ def _archetype_recipe(
         }
     if archetype == "low_inventory":
         return {
-            "elasticity": rng.uniform(-1.8, -1.1),
-            "cost_ratio": rng.uniform(0.58, 0.70),
-            "weeks_of_cover": rng.uniform(1.1, 1.8) * inventory_scale,
-            "inbound_weeks": rng.uniform(0.1, 0.5) * inbound_scale,
+            "elasticity": rng.uniform(-2.2, -1.4),
+            "cost_ratio": rng.uniform(0.56, 0.68),
+            "weeks_of_cover": rng.uniform(0.95, 1.35),
+            "inbound_weeks": rng.uniform(0.1, 0.4),
             "competitor_multiplier": rng.uniform(0.92, 0.99),
             "min_margin_pct": 0.22,
             "competitor_tolerance_pct": 0.06,
@@ -126,10 +108,10 @@ def _archetype_recipe(
         }
     if archetype == "overstock":
         return {
-            "elasticity": rng.uniform(-2.4, -1.6),
-            "cost_ratio": rng.uniform(0.52, 0.64),
-            "weeks_of_cover": rng.uniform(7.0, 10.0) * inventory_scale,
-            "inbound_weeks": rng.uniform(0.8, 1.5) * inbound_scale,
+            "elasticity": rng.uniform(-3.6, -2.8),
+            "cost_ratio": rng.uniform(0.47, 0.58),
+            "weeks_of_cover": rng.uniform(5.8, 8.2),
+            "inbound_weeks": rng.uniform(0.5, 1.1),
             "competitor_multiplier": rng.uniform(0.74, 0.84),
             "min_margin_pct": 0.20,
             "competitor_tolerance_pct": 0.05,
@@ -139,8 +121,8 @@ def _archetype_recipe(
         return {
             "elasticity": rng.uniform(-1.3, -0.8),
             "cost_ratio": rng.uniform(0.72, 0.83),
-            "weeks_of_cover": rng.uniform(3.2, 5.0) * inventory_scale,
-            "inbound_weeks": rng.uniform(0.4, 0.9) * inbound_scale,
+            "weeks_of_cover": rng.uniform(2.4, 3.8),
+            "inbound_weeks": rng.uniform(0.3, 0.7),
             "competitor_multiplier": rng.uniform(0.90, 0.98),
             "min_margin_pct": 0.28,
             "competitor_tolerance_pct": 0.05,
@@ -148,20 +130,20 @@ def _archetype_recipe(
         }
     if archetype == "promotion_opportunity":
         return {
-            "elasticity": rng.uniform(-2.2, -1.5),
-            "cost_ratio": rng.uniform(0.50, 0.62),
-            "weeks_of_cover": rng.uniform(4.5, 7.0) * inventory_scale,
-            "inbound_weeks": rng.uniform(0.6, 1.1) * inbound_scale,
+            "elasticity": rng.uniform(-3.8, -3.0),
+            "cost_ratio": rng.uniform(0.45, 0.57),
+            "weeks_of_cover": rng.uniform(3.6, 5.6),
+            "inbound_weeks": rng.uniform(0.4, 0.8),
             "competitor_multiplier": rng.uniform(0.80, 0.90),
             "min_margin_pct": 0.20 if role in {"kvi", "traffic_driver"} else 0.24,
             "competitor_tolerance_pct": 0.05,
             "competitor_weight": 2 if role in {"kvi", "traffic_driver"} else 1,
         }
     return {
-        "elasticity": rng.uniform(-1.4, -0.9),
-        "cost_ratio": rng.uniform(0.56, 0.68),
-        "weeks_of_cover": rng.uniform(2.8, 4.2) * inventory_scale,
-        "inbound_weeks": rng.uniform(0.4, 0.8) * inbound_scale,
+        "elasticity": rng.uniform(-2.3, -1.6),
+        "cost_ratio": rng.uniform(0.52, 0.64),
+        "weeks_of_cover": rng.uniform(2.1, 3.4),
+        "inbound_weeks": rng.uniform(0.3, 0.6),
         "competitor_multiplier": rng.uniform(0.98, 1.05),
         "min_margin_pct": 0.22 if role in {"kvi", "traffic_driver"} else 0.26,
         "competitor_tolerance_pct": 0.05,
@@ -175,9 +157,6 @@ def build_demo_scenario(
     settings: ScenarioSettings | None = None,
 ) -> dict[str, int | float | str]:
     settings = settings or ScenarioSettings()
-    if settings.profile_id not in PROFILE_CONFIG:
-        raise ValueError(f"Unknown profile_id: {settings.profile_id}")
-
     product_df = pd.read_sql(
         """
         SELECT
@@ -252,12 +231,7 @@ def build_demo_scenario(
             role=role,
             ordinal=ordinal,
         )
-        recipe = _archetype_recipe(
-            archetype=archetype,
-            role=role,
-            profile_id=settings.profile_id,
-            rng=rng,
-        )
+        recipe = _archetype_recipe(archetype=archetype, role=role, rng=rng)
 
         grouped.append(
             _repair_row(
@@ -293,7 +267,7 @@ def build_demo_scenario(
     scenario_df = pd.DataFrame(grouped).sort_values("upc").reset_index(drop=True)
     stats = _persist_scenario(conn, dataset_version_id, latest_week.strftime("%Y-%m-%d"), scenario_df, settings)
     return {
-        "profile_id": settings.profile_id,
+        "scenario_id": settings.scenario_id,
         "products": int(len(scenario_df)),
         "candidate_outcomes": int(stats["candidate_count"]),
         "hard_valid_candidates": int(stats["hard_valid_candidates"]),
@@ -318,22 +292,15 @@ def _repair_row(row: dict[str, object]) -> dict[str, object]:
         zero_discount = next(candidate for candidate in candidate_rows if candidate["discount_pct"] == 0.0)
         if "inventory" in zero_discount["hard_violation_reason"]:
             baseline_units = float(row["baseline_units"])
-            safety_stock = float(row["safety_stock_units"])
-            required_inventory = baseline_units + safety_stock
-            total_inventory = max(float(row["on_hand_units"]) + float(row["inbound_units"]), required_inventory)
-            row["on_hand_units"] = int(round(total_inventory * 0.8))
-            row["inbound_units"] = int(round(total_inventory - int(row["on_hand_units"])))
+            row["on_hand_units"] = int(round(max(float(row["on_hand_units"]), baseline_units * 1.03)))
         attempt += 1
 
     baseline_units = float(row["baseline_units"])
     uncertainty_pct = float(row["uncertainty_pct"])
-    safety_stock = float(row["safety_stock_units"])
     min_margin_pct = float(row["min_margin_pct"])
     list_price = float(row["list_price"])
     row["unit_cost"] = _round_money(min(float(row["unit_cost"]), list_price * (1 - min_margin_pct - 0.05)))
-    minimum_total_inventory = baseline_units * (1 + uncertainty_pct) + safety_stock + 1
-    row["on_hand_units"] = int(round(minimum_total_inventory * 0.8))
-    row["inbound_units"] = int(round(minimum_total_inventory - int(row["on_hand_units"])))
+    row["on_hand_units"] = int(round(max(float(row["on_hand_units"]), baseline_units * (1 + uncertainty_pct) + 1)))
     row["candidate_rows"] = _evaluate_candidates(row)
     return row
 
@@ -345,8 +312,7 @@ def _evaluate_candidates(row: dict[str, object]) -> list[dict[str, object]]:
         elasticity=float(row["elasticity"]),
         uncertainty_pct=float(row["uncertainty_pct"]),
     )
-    total_inventory = int(row["on_hand_units"]) + int(row["inbound_units"])
-    safety_stock_units = float(row["safety_stock_units"])
+    on_hand_units = int(row["on_hand_units"])
     min_margin_pct = float(row["min_margin_pct"])
     competitor_price = float(row["competitor_price"])
     competitor_tolerance = float(row["competitor_tolerance_pct"])
@@ -357,16 +323,16 @@ def _evaluate_candidates(row: dict[str, object]) -> list[dict[str, object]]:
     for rank, discount_pct in enumerate(DISCOUNT_STEPS, start=1):
         candidate_price = _round_money(list_price * (1 - discount_pct))
         estimate = model.predict(candidate_price)
-        expected_units_capped = min(estimate.mean_units, total_inventory)
-        optimistic_units_capped = min(estimate.upper_units, total_inventory)
-        expected_lost_units = max(estimate.mean_units - total_inventory, 0.0)
-        optimistic_lost_units = max(estimate.upper_units - total_inventory, 0.0)
-        ending_inventory = total_inventory - optimistic_units_capped
+        expected_units_capped = min(estimate.mean_units, on_hand_units)
+        optimistic_units_capped = min(estimate.upper_units, on_hand_units)
+        expected_lost_units = max(estimate.mean_units - on_hand_units, 0.0)
+        optimistic_lost_units = max(estimate.upper_units - on_hand_units, 0.0)
+        ending_inventory = on_hand_units - estimate.mean_units
         gross_margin_pct = (candidate_price - unit_cost) / candidate_price if candidate_price else 0.0
         violation_reasons: list[str] = []
         if gross_margin_pct + 1e-9 < min_margin_pct:
             violation_reasons.append("margin")
-        if ending_inventory + 1e-9 < safety_stock_units:
+        if ending_inventory + 1e-9 < 0:
             violation_reasons.append("inventory")
         competitor_index = candidate_price / competitor_price if competitor_price else None
         competitor_gap = (
@@ -389,7 +355,7 @@ def _evaluate_candidates(row: dict[str, object]) -> list[dict[str, object]]:
                 "gross_profit": round(gross_profit, 4),
                 "gross_margin_pct": round(gross_margin_pct, 4),
                 "competitor_index": round(competitor_index, 4) if competitor_index is not None else None,
-                "inventory_cap_units": total_inventory,
+                "inventory_cap_units": on_hand_units,
                 "expected_units_capped": _round_units(expected_units_capped),
                 "list_price": list_price,
                 "markdown_investment": round(expected_units_capped * (list_price - candidate_price), 4),
@@ -462,7 +428,7 @@ def _persist_scenario(
             dataset_version_id,
             planning_week_end,
             settings.seed,
-            "lexicographic_competitor_then_profit",
+            "maximize_expected_gross_profit_subject_to_rules",
             json_dumps(
                 {
                     "source": "synthetic_context",
