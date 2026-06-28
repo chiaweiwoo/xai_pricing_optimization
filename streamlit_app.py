@@ -507,6 +507,28 @@ def main() -> None:
             "Budget used is markdown spend divided by list-price revenue. "
             "GP vs Current shows whether the campaign outperforms leaving all current prices unchanged."
         )
+        with st.expander("What is weighted competitor gap?", expanded=False):
+            st.write(
+                "Weighted competitor gap is a penalty score for being too expensive versus competitors on important SKUs."
+            )
+            st.markdown(
+                """
+                Formula intuition:
+
+                - `competitor gap = max(our price index - allowed competitor threshold, 0)`
+                - `weighted competitor gap = sum(competitor gap * sku importance weight)`
+
+                How to read it:
+
+                - lower is better
+                - `0.0000` means every selected SKU is within its tolerated competitor position
+                - a higher value means more important SKUs are priced above their tolerated competitor position
+                """
+            )
+            st.caption(
+                "The official proposal minimizes this first, then maximizes gross profit. "
+                "That is why the official plan can make less money than the profit-first benchmark while still being the chosen recommendation."
+            )
 
         overview_tab, sku_tab, chat_tab, guide_tab = st.tabs(["Plan Overview", "SKU Inspector", "Assistant", "Guide"])
 
@@ -523,6 +545,10 @@ def main() -> None:
                 "Read this table left to right. Gross profit and revenue are business outputs. "
                 "Weighted competitor gap is a penalty-style score where lower is better. "
                 "The official proposal intentionally accepts less profit than the profit-first benchmark when it improves price position."
+            )
+            st.info(
+                "Quick read: if two plans have similar gross profit, prefer the one with lower weighted competitor gap. "
+                "If one plan has much higher profit but also much higher weighted competitor gap, the difference is the cost of protecting price position."
             )
             st.dataframe(_bundle_to_benchmark_table(plan), use_container_width=True, hide_index=True)
             with st.expander("What each benchmark means", expanded=False):
